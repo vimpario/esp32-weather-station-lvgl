@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 // ===========================================================================
 // lvgl_ui.h — SHARED LVGL UI, compiled by BOTH targets.
@@ -26,17 +26,49 @@
 
 #include "lvgl.h"
 
+#include "i18n.h"
 #include "weather_core.h"
+
+#if defined(WS_LVGL_FONTS)
+#include "ws_fonts.h"
+#endif
 
 namespace ws_ui {
 
 // ---------------------------------------------------------------------------
-// Fonts: the same LVGL font assets on the PC and on the device. The list is
-// configured once in include/lv_conf.h, so geometry cannot diverge.
+// Fonts: the same LVGL font assets on the PC and on the device.
+//
+//   WS_LVGL_FONTS defined → the shared generated Montserrat fonts with Cyrillic
+//                           coverage (lib/ws_fonts) — required for Russian.
+//   otherwise             → LVGL's built-in Montserrat (Latin only), i.e. the
+//                           fallback for a build that has no font asset yet.
+//
+// Icons drawn as glyphs (the water droplet = LV_SYMBOL_TINT) live in the
+// FontAwesome subset that only exists in LVGL's built-in fonts, so they use a
+// separate accessor and keep working in both cases.
 // ---------------------------------------------------------------------------
+#if defined(WS_LVGL_FONTS)
+inline const lv_font_t* font_small() { return &ws_font_14; }
+inline const lv_font_t* font_normal() { return &ws_font_20; }
+inline const lv_font_t* font_large() { return &ws_font_28; }
+/* Icon glyphs (LV_SYMBOL_*) live in the FontAwesome subset of LVGL's built-in
+   fonts. Picked by box size, because a 28 px glyph would be clipped in a 22 px
+   icon box and lose the droplet's tip. */
+inline const lv_font_t* font_symbols_for(int size) {
+  if (size >= 28) { return &lv_font_montserrat_28; }
+  if (size >= 20) { return &lv_font_montserrat_20; }
+  return &lv_font_montserrat_14;
+}
+#else
 inline const lv_font_t* font_small() { return &lv_font_montserrat_14; }
 inline const lv_font_t* font_normal() { return &lv_font_montserrat_20; }
 inline const lv_font_t* font_large() { return &lv_font_montserrat_28; }
+inline const lv_font_t* font_symbols_for(int size) {
+  if (size >= 28) { return &lv_font_montserrat_28; }
+  if (size >= 20) { return &lv_font_montserrat_20; }
+  return &lv_font_montserrat_14;
+}
+#endif
 
 // Largest enabled font whose glyph still fits an icon box of `size` pixels.
 inline const lv_font_t* font_for_icon(int size) {
@@ -193,11 +225,12 @@ inline void draw_icon(lv_obj_t* parent, IconId icon, const LayoutRect& rect, lv_
       break;
     }
     case IconId::kHumidity: {
-      /* Real water drop: LVGL's built-in Montserrat fonts embed the FontAwesome
-       * symbol set, so the droplet is a single glyph — crisp and byte-identical
-       * on the PC and on the device — instead of stacked primitive objects. */
+      /* Real water drop: LVGL's built-in fonts embed the FontAwesome symbol set,
+       * so the droplet is a single glyph. It uses font_symbols() — the generated
+       * UI fonts carry Latin+Cyrillic only — which keeps the icon identical on
+       * the PC and on the device instead of stacking primitive objects. */
       lv_obj_t* glyph = lv_label_create(parent);
-      lv_obj_set_style_text_font(glyph, font_for_icon(size), LV_PART_MAIN);
+      lv_obj_set_style_text_font(glyph, font_symbols_for(size), LV_PART_MAIN);
       lv_obj_set_style_text_color(glyph, color, LV_PART_MAIN);
       lv_obj_set_style_pad_all(glyph, 0, LV_PART_MAIN);
       lv_label_set_text(glyph, LV_SYMBOL_TINT);
@@ -350,6 +383,22 @@ struct Ui {
   lv_obj_t* info_title = nullptr;
   lv_obj_t* info_text = nullptr;
   bool info_visible = false;
+  /* --------------------------------------------------------------------- i18n
+     Application state, identical to the Web UI: the locale starts unset and the
+     language-selection screen owns the display until the user picks one. */
+  lv_obj_t* lang_screen = nullptr;
+  lv_obj_t* lang_title = nullptr;
+  lv_obj_t* lang_instruction = nullptr;
+  lv_obj_t* lang_button[kLocaleCount] = {nullptr, nullptr};
+  lv_obj_t* lang_button_label[kLocaleCount] = {nullptr, nullptr};
+  lv_obj_t* lang_hint = nullptr;
+  Locale locale = Locale::kNone;
+  AppScreen screen = AppScreen::kLanguageSelection;
+  lv_group_t* input_group = nullptr;
+  /* Host hook: a *user* picked a language (button/keyboard), not the host API. */
+  void (*on_locale_change)(void* user_data, Locale locale) = nullptr;
+  void* on_locale_change_user = nullptr;
+
   DisplayGeometry geometry = kGeometry320x240;
   DisplayMode mode = DisplayMode::kNumeric;
   /* Animations are part of the UI, not of the host: the simulator can switch
@@ -583,6 +632,148 @@ inline void nav_button_event_cb(lv_event_t* event) {
   if (ui->on_mode_change != nullptr) { ui->on_mode_change(ui->on_mode_change_user, mode); }
 }
 
+// ---------------------------------------------------------------------------
+// Language selection (first screen on every start) and locale application.
+//
+// The screen owns the display until a locale is chosen: the dashboard (header,
+// mode strip, cards, history) is hidden, exactly like the Web UI hides it. The
+// transition into the dashboard is a short fade/slide that also honours reduced
+// motion. No translation happens at the call site — every label is looked up by
+// key through tr().
+// ---------------------------------------------------------------------------
+constexpr uint32_t kScreenTransitionMs = 220;
+
+inline void ui_set_screen(Ui& ui, AppScreen screen);
+inline void ui_apply_locale(Ui& ui, Locale locale);
+
+inline void language_button_event_cb(lv_event_t* event) {
+  Ui* ui = (Ui*)lv_event_get_user_data(event);
+  if (ui == nullptr) { return; }
+  lv_obj_t* button = lv_event_get_target_obj(event);
+  const int index = (int)(intptr_t)lv_obj_get_user_data(button);
+  if (index < 0 || index >= (int)kLocaleCount) { return; }
+  const Locale chosen = localeAt((uint8_t)index);
+  if (ui->debug_events) { printf("[UI][DEBUG] language click %s\n", localeId(chosen)); }
+  ui_apply_locale(*ui, chosen);
+  if (ui->on_locale_change != nullptr) { ui->on_locale_change(ui->on_locale_change_user, chosen); }
+}
+
+/* Screen switch: visibility of the two screens plus the keyboard focus group, so
+   TAB/arrows never land on an invisible button. */
+inline void ui_set_screen(Ui& ui, AppScreen screen) {
+  ui.screen = screen;
+  const bool dashboard = (screen == AppScreen::kDashboard);
+  /* Layout-owned rectangles: the language panel is placed from the same
+     computeLayout() both targets use, never from local arithmetic. */
+  if (ui.lang_screen != nullptr) {
+    const DisplayLayout layout = computeLayout(ui.mode, PresentationModel{}, ui.geometry);
+    place(ui.lang_screen, layout.lang_panel);
+    place_in(ui.lang_title, layout.lang_title, layout.lang_panel);
+    place_in(ui.lang_instruction, layout.lang_instruction, layout.lang_panel);
+    for (uint8_t i = 0; i < kLocaleCount; i += 1) {
+      place_in(ui.lang_button[i], layout.lang_button[i], layout.lang_panel);
+    }
+    place_in(ui.lang_hint, layout.lang_hint, layout.lang_panel);
+  }
+  if (ui.lang_screen != nullptr) {
+    if (dashboard) {
+      lv_obj_add_flag(ui.lang_screen, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_remove_flag(ui.lang_screen, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_move_foreground(ui.lang_screen);
+    }
+  }
+  lv_obj_t* dashboard_objects[] = {ui.header, ui.nav, ui.content, ui.info_panel};
+  for (size_t i = 0; i < sizeof(dashboard_objects) / sizeof(dashboard_objects[0]); i += 1) {
+    if (dashboard_objects[i] == nullptr) { continue; }
+    if (i == 3 && !ui.info_visible) { continue; }  /* the overlay keeps its own state */
+    if (dashboard) {
+      lv_obj_remove_flag(dashboard_objects[i], LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(dashboard_objects[i], LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+  if (ui.input_group != nullptr) {
+    for (uint8_t i = 0; i < kLocaleCount; i += 1) {
+      if (ui.lang_button[i] == nullptr) { continue; }
+      if (dashboard) {
+        lv_group_remove_obj(ui.lang_button[i]);
+      } else {
+        lv_group_add_obj(ui.input_group, ui.lang_button[i]);
+      }
+    }
+    for (uint8_t i = 0; i < kDisplayModeCount; i += 1) {
+      if (ui.nav_button[i] == nullptr) { continue; }
+      if (dashboard) {
+        lv_group_add_obj(ui.input_group, ui.nav_button[i]);
+      } else {
+        lv_group_remove_obj(ui.nav_button[i]);
+      }
+    }
+    if (!dashboard && ui.lang_button[0] != nullptr) { lv_group_focus_obj(ui.lang_button[0]); }
+    if (dashboard && ui.nav_button[0] != nullptr) { lv_group_focus_obj(ui.nav_button[0]); }
+  }
+}
+
+/* Applies only the TEXT locale (language screen + dashboard labels) without
+   changing the visible screen. Used for the golden captures, which need both the
+   RU and the EN language screen, and by a device that shows the selector in a
+   default language before the user chooses. */
+inline void ui_apply_text_locale(Ui& ui, Locale locale) {
+  const Locale previous = ui.locale;
+  ui.locale = locale;
+  ui_apply_locale(ui, locale);
+  /* ui_apply_locale() jumps to the dashboard for a real locale: undo that when
+     the caller only asked for text, keeping the screen it had. */
+  if (previous == Locale::kNone) { ui_set_screen(ui, AppScreen::kLanguageSelection); }
+}
+
+/* Applies a locale to every label of the dashboard and (when the locale becomes
+   known) moves from the language screen to the dashboard with a short fade. */
+inline void ui_apply_locale(Ui& ui, Locale locale) {
+  ui.locale = locale;
+  const Locale text_locale = (locale == Locale::kNone) ? Locale::kEn : locale;
+
+  /* Language screen itself: the button captions are native names, so they read
+     the same in both locales by design. */
+  if (ui.lang_title != nullptr) { lv_label_set_text(ui.lang_title, tr(TextKey::kAppTitle, text_locale)); }
+  if (ui.lang_instruction != nullptr) {
+    lv_label_set_text(ui.lang_instruction, tr(TextKey::kChooseLanguage, text_locale));
+  }
+  if (ui.lang_hint != nullptr) { lv_label_set_text(ui.lang_hint, tr(TextKey::kLanguageHint, text_locale)); }
+  for (uint8_t i = 0; i < kLocaleCount; i += 1) {
+    if (ui.lang_button_label[i] == nullptr) { continue; }
+    lv_label_set_text(ui.lang_button_label[i],
+                      tr((i == 0) ? TextKey::kLanguageRu : TextKey::kLanguageEn, text_locale));
+  }
+
+  /* Dashboard chrome. The header is one line wide, so it uses the compact title
+     (the full name would collide with the status badge on 320x240); the language
+     screen and the status panel have room for the full name. */
+  if (ui.title != nullptr) { lv_label_set_text(ui.title, tr(TextKey::kAppTitleShort, text_locale)); }
+  for (uint8_t i = 0; i < kDisplayModeCount; i += 1) {
+    if (ui.nav_label[i] == nullptr) { continue; }
+    const TextKey short_keys[kDisplayModeCount] = {
+        TextKey::kTabNumericShort, TextKey::kTabHorizontalShort, TextKey::kTabBarsShort,
+        TextKey::kTabGaugesShort, TextKey::kTabHistoryShort};
+    lv_label_set_text(ui.nav_label[i], tr(short_keys[i], text_locale));
+  }
+  if (ui.info_title != nullptr) { lv_label_set_text(ui.info_title, tr(TextKey::kAppTitle, text_locale)); }
+  if (ui.history_axis_to != nullptr) { lv_label_set_text(ui.history_axis_to, tr(TextKey::kNow, text_locale)); }
+
+  if (locale != Locale::kNone) { ui_set_screen(ui, AppScreen::kDashboard); }
+}
+
+// Short display label for a metric card: full name when it fits the rectangle,
+// the compact form otherwise (adaptive typography driven by the layout box, not
+// by a per-locale hardcode at the call site).
+inline const char* localized_metric_label(TextKey full, TextKey compact, Locale locale,
+                                          const lv_font_t* font, int width) {
+  const char* candidate = tr(full, locale);
+  if (estimate_text_width(candidate, font) <= width) { return candidate; }
+  return tr(compact, locale);
+}
+
 // Builds the whole tree once. `parent` is usually lv_screen_active().
 inline void ui_build(Ui& ui, lv_obj_t* parent, DisplayGeometry geometry) {
   ui.geometry = geometry;
@@ -731,8 +922,54 @@ inline void ui_build(Ui& ui, lv_obj_t* parent, DisplayGeometry geometry) {
   lv_label_set_long_mode(ui.info_text, LV_LABEL_LONG_MODE_WRAP);
   lv_label_set_text(ui.info_text, "");
 
+  /* ---- language selection (first screen on every start) ------------------ */
+  ui.lang_screen = lv_obj_create(ui.root);
+  apply_glass(ui.lang_screen, glass_for(DataState::kFresh, ColorToken::kTempComfort));
+  lv_obj_set_style_bg_grad_opa(ui.lang_screen, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(ui.lang_screen, lv_color_hex(0x0E1726), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(ui.lang_screen, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_shadow_width(ui.lang_screen, 28, LV_PART_MAIN);
+  lv_obj_set_style_shadow_opa(ui.lang_screen, LV_OPA_50, LV_PART_MAIN);
+
+  ui.lang_title = make_text(ui.lang_screen, font_normal(), lv_color_hex(0xEEF4FF));
+  lv_obj_set_style_text_align(ui.lang_title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_label_set_long_mode(ui.lang_title, LV_LABEL_LONG_MODE_DOTS);
+  ui.lang_instruction = make_text(ui.lang_screen, font_small(), lv_color_hex(0x9FB2CC));
+  lv_obj_set_style_text_align(ui.lang_instruction, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_label_set_long_mode(ui.lang_instruction, LV_LABEL_LONG_MODE_DOTS);
+  ui.lang_hint = make_text(ui.lang_screen, font_small(), lv_color_hex(0x7F8FA6));
+  lv_obj_set_style_text_align(ui.lang_hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_label_set_long_mode(ui.lang_hint, LV_LABEL_LONG_MODE_WRAP);
+
+  for (uint8_t i = 0; i < kLocaleCount; i += 1) {
+    lv_obj_t* button = lv_button_create(ui.lang_screen);
+    lv_obj_set_user_data(button, (void*)(intptr_t)i);
+    lv_obj_set_style_radius(button, 12, LV_PART_MAIN);
+    lv_obj_set_style_border_width(button, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(button, lv_color_hex(0x43D19E), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x2FD3C0), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_color(button, lv_color_hex(0x43D19E), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_dir(button, LV_GRAD_DIR_HOR, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(button, 210, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(button, 255, LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(button, 255, LV_STATE_FOCUSED);
+    lv_obj_set_style_shadow_width(button, 14, LV_PART_MAIN);
+    lv_obj_set_style_shadow_color(button, lv_color_hex(0x2FD3C0), LV_PART_MAIN);
+    lv_obj_set_style_shadow_opa(button, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_style_transition(button, &trans_fast(), LV_STATE_PRESSED);
+    lv_obj_set_style_transition(button, &trans_fast(), LV_STATE_FOCUSED);
+    ui.lang_button_label[i] = make_text(button, font_normal(), lv_color_hex(0x06231E));
+    lv_obj_center(ui.lang_button_label[i]);
+    lv_obj_add_event_cb(button, language_button_event_cb, LV_EVENT_CLICKED, &ui);
+    ui.lang_button[i] = button;
+  }
+
   ui_set_mode(ui, ui.mode);
   ui_set_info_visible(ui, false);
+  /* First-run state: no locale yet, so the language screen owns the display and
+     the dashboard stays hidden until a choice is made. */
+  ui_apply_locale(ui, Locale::kNone);
+  ui_set_screen(ui, AppScreen::kLanguageSelection);
 }
 
 // Mode switching = presentation state only: geometry + which parts are visible.
@@ -860,14 +1097,14 @@ inline void ui_set_mode(Ui& ui, DisplayMode mode) {
 // for callers that switch modes from the outside (keyboard, CLI, device input).
 inline void ui_set_mode_animated(Ui& ui, DisplayMode mode) { ui_set_mode(ui, mode); }
 
-// Registers the mode buttons with an LVGL input group, so a keypad/rotary input
-// can focus them and activate with ENTER (the SDL keyboard driver is a keypad
-// indev). Without an input device the strip is still rendered, just inert.
+// Registers the interactive buttons with an LVGL input group, so a keypad/rotary
+// input can focus them and activate with ENTER (the SDL keyboard driver is a
+// keypad indev). Membership follows the active screen: only the visible screen's
+// buttons are in the group, so TAB/arrows never land on an invisible widget.
 inline void ui_attach_input_group(Ui& ui, lv_group_t* group) {
   if (group == nullptr) { return; }
-  for (uint8_t i = 0; i < kDisplayModeCount; i += 1) {
-    if (ui.nav_button[i] != nullptr) { lv_group_add_obj(group, ui.nav_button[i]); }
-  }
+  ui.input_group = group;
+  ui_set_screen(ui, ui.screen);
 }
 
 // The focused button is highlighted by LVGL's own focus state, so nothing else
@@ -884,6 +1121,7 @@ inline void ui_focus_mode_button(Ui& ui, lv_group_t* group) {
 inline void ui_update(Ui& ui, const PresentationModel& model, const char* status_text) {
   const MetricPresentation* metrics[3] = {&model.temperature, &model.humidity, &model.pressure};
   const DisplayLayout layout = computeLayout(ui.mode, model, ui.geometry);
+  const Locale locale = (ui.locale == Locale::kNone) ? Locale::kEn : ui.locale;
   for (int i = 0; i < 3; i += 1) {
     const MetricPresentation& metric = *metrics[i];
     MetricWidgets& widgets = ui.metrics[i];
@@ -917,11 +1155,22 @@ inline void ui_update(Ui& ui, const PresentationModel& model, const char* status
                                                                   : LV_TEXT_ALIGN_LEFT,
                                 LV_PART_MAIN);
 
+    /* Card label: localized full name when it fits, compact form otherwise. The
+     * choice is made from the measurement of the layout rectangle, so a longer
+     * translation can never clip. */
+    const TextKey full_keys[3] = {TextKey::kTemperature, TextKey::kHumidity, TextKey::kPressure};
+    const TextKey short_keys[3] = {TextKey::kTemperatureShort, TextKey::kHumidityShort,
+                                   TextKey::kPressureShort};
     lv_label_set_text(widgets.label,
-                      label_fitting(metric.label_latin, metric.icon, font_small(),
-                                    lv_obj_get_width(widgets.label)));
+                      localized_metric_label(full_keys[i], short_keys[i], locale, font_small(),
+                                             lv_obj_get_width(widgets.label)));
     lv_label_set_text(widgets.unit, metric.unit);
-    lv_label_set_text(widgets.state, dataStateName(metric.state));
+    /* State badge: localized word, semantic role stays in dataStateName(). */
+    const TextKey state_keys[3] = {TextKey::kFresh, TextKey::kStale, TextKey::kError};
+    const TextKey state_key = (metric.state == DataState::kError)
+                                  ? state_keys[2]
+                                  : ((metric.state == DataState::kStale) ? state_keys[1] : state_keys[0]);
+    lv_label_set_text(widgets.state, tr(state_key, locale));
     lv_obj_set_style_text_color(widgets.state, token_color(colorTokenForState(metric.state)), LV_PART_MAIN);
 
     if (ui.mode != DisplayMode::kHistory) {
@@ -948,14 +1197,24 @@ inline void ui_update(Ui& ui, const PresentationModel& model, const char* status
   }
 }
 
-// Header badge + diagnostics overlay. The host supplies every string; the UI only
-// decides *where* it goes and which semantic colour the connection state gets.
+// Header badge + diagnostics overlay. The host supplies the *values* (and the
+// connection state, which is protocol data), the UI owns the words: every label
+// here is looked up by key in the active locale.
 inline void ui_update_status(Ui& ui, const StatusView& status) {
+  const Locale locale = (ui.locale == Locale::kNone) ? Locale::kEn : ui.locale;
   const char* source = (status.source != nullptr) ? status.source : "";
   const char* connection = (status.connection != nullptr) ? status.connection : "";
-  char badge[48];
-  if (connection[0] != '\0') {
-    snprintf(badge, sizeof(badge), "%s %s", source, connection);
+  /* The connection word is localized; the source word (LIVE/DEMO) is an
+     identifier and reads the same in both locales. */
+  const char* connection_text = connection;
+  if (strcmp(connection, "ONLINE") == 0) { connection_text = tr(TextKey::kOnline, locale); }
+  else if (strcmp(connection, "OFFLINE") == 0) { connection_text = tr(TextKey::kOffline, locale); }
+  else if (strcmp(connection, "CONNECTING") == 0) { connection_text = tr(TextKey::kConnecting, locale); }
+  else if (strcmp(connection, "ERROR") == 0) { connection_text = tr(TextKey::kError, locale); }
+
+  char badge[64];
+  if (connection_text[0] != '\0') {
+    snprintf(badge, sizeof(badge), "%s %s", source, connection_text);
   } else {
     snprintf(badge, sizeof(badge), "%s", source);
   }
@@ -969,28 +1228,35 @@ inline void ui_update_status(Ui& ui, const StatusView& status) {
 
   if (ui.info_text == nullptr) { return; }
   const uint32_t age_s = status.age_ms / 1000u;
-  char http_text[16];
+  char http_text[24];
   if (status.http_status > 0) {
     snprintf(http_text, sizeof(http_text), "%d", status.http_status);
   } else {
-    snprintf(http_text, sizeof(http_text), "no response");
+    snprintf(http_text, sizeof(http_text), "%s", tr(TextKey::kNoResponse, locale));
   }
-  char text[512];
+  char text[640];
   snprintf(text, sizeof(text),
-           "Source: %s\n"
-           "Endpoint: %s\n"
-           "HTTP: %s\n"
-           "Latency: %.1f ms\n"
-           "Last update: %s\n"
-           "Data age: %u.%u s\n"
-           "Polls: %u ok / %u err | fields %d/%d\n"
-           "Note: %s",
-           source[0] != '\0' ? source : "-",
+           "%s: %s\n"
+           "%s: %s\n"
+           "%s: %s\n"
+           "%s: %.1f ms\n"
+           "%s: %s\n"
+           "%s: %u.%u %s\n"
+           "%s: %u / %u | %s %d/%d\n"
+           "%s: %s",
+           tr(TextKey::kSource, locale), source[0] != '\0' ? source : "-",
+           tr(TextKey::kEndpoint, locale),
            (status.endpoint != nullptr && status.endpoint[0] != '\0') ? status.endpoint : "-",
-           http_text, (double)status.latency_ms,
-           (status.last_update != nullptr) ? status.last_update : "-", (unsigned)(age_s / 10),
-           (unsigned)(age_s % 10), (unsigned)status.success_count, (unsigned)status.error_count,
-           status.fields_seen, status.fields_expected,
+           tr(TextKey::kHttp, locale), http_text,
+           tr(TextKey::kLatency, locale), (double)status.latency_ms,
+           tr(TextKey::kLastUpdate, locale),
+           (status.last_update != nullptr) ? status.last_update : "-",
+           tr(TextKey::kDataAge, locale), (unsigned)(age_s / 10), (unsigned)(age_s % 10),
+           tr(TextKey::kSeconds, locale),
+           tr(TextKey::kPolls, locale), (unsigned)status.success_count,
+           (unsigned)status.error_count, tr(TextKey::kFields, locale), status.fields_seen,
+           status.fields_expected,
+           tr(TextKey::kNote, locale),
            (status.note != nullptr && status.note[0] != '\0') ? status.note : "-");
   lv_label_set_text(ui.info_text, text);
 }
@@ -1000,9 +1266,10 @@ inline void ui_update_status(Ui& ui, const StatusView& status) {
 // Lane rectangles come from the shared layout, never from local arithmetic.
 inline void ui_update_history(Ui& ui, const PresentationModel& model, const HistoryView& view) {
   const DisplayLayout layout = computeLayout(DisplayMode::kHistory, model, ui.geometry);
+  const Locale locale = (ui.locale == Locale::kNone) ? Locale::kEn : ui.locale;
 
   if (!view.available || view.count < 2) {
-    lv_label_set_text(ui.history_empty, "Collecting history...");
+    lv_label_set_text(ui.history_empty, tr(TextKey::kCollectingHistory, locale));
     lv_obj_remove_flag(ui.history_empty, LV_OBJ_FLAG_HIDDEN);
     for (int i = 0; i < 3; i += 1) {
       lv_obj_add_flag(ui.history_lines[i], LV_OBJ_FLAG_HIDDEN);
@@ -1011,19 +1278,19 @@ inline void ui_update_history(Ui& ui, const PresentationModel& model, const Hist
     return;
   }
 
-  char info[64];
-  /* ASCII separator only: the built-in Montserrat fonts have no U+00B7 glyph,
-     which would render as a missing-glyph box on the panel. */
-  snprintf(info, sizeof(info), "history: %d points | %s window",
-           (int)view.count, (view.window_label != nullptr) ? view.window_label : "");
+  char info[96];
+  /* ASCII separator only: a middle dot is not in every font subset. */
+  snprintf(info, sizeof(info), "%s: %d %s | %s %s", tr(TextKey::kHistory, locale),
+           (int)view.count, tr(TextKey::kPoints, locale), view.window_label,
+           tr(TextKey::kWindow, locale));
   lv_label_set_text(ui.history_empty, info);
   lv_obj_remove_flag(ui.history_empty, LV_OBJ_FLAG_HIDDEN);
   if (view.window_label != nullptr && view.window_label[0] != '\0') {
     lv_label_set_text_fmt(ui.history_axis_from, "-%s", view.window_label);
   } else {
-    lv_label_set_text(ui.history_axis_from, "start");
+    lv_label_set_text(ui.history_axis_from, "-");
   }
-  lv_label_set_text(ui.history_axis_to, "now");
+  lv_label_set_text(ui.history_axis_to, tr(TextKey::kNow, locale));
 
   static lv_point_precise_t points[3][192];
   const ColorToken tokens[3] = {ColorToken::kTempComfort, ColorToken::kHumidityComfort,
@@ -1054,9 +1321,12 @@ inline void ui_update_history(Ui& ui, const PresentationModel& model, const Hist
     } else {
       lv_obj_add_flag(ui.history_lines[m], LV_OBJ_FLAG_HIDDEN);
     }
+    const TextKey full_keys[3] = {TextKey::kTemperature, TextKey::kHumidity, TextKey::kPressure};
+    const TextKey short_keys[3] = {TextKey::kTemperatureShort, TextKey::kHumidityShort,
+                                   TextKey::kPressureShort};
     lv_label_set_text(ui.history_labels[m],
-                      label_fitting(labels[m], icon_id_for_index(m), font_small(),
-                                    layout.history_label[m].w));
+                      localized_metric_label(full_keys[m], short_keys[m], locale, font_small(),
+                                             layout.history_label[m].w));
     lv_obj_remove_flag(ui.history_labels[m], LV_OBJ_FLAG_HIDDEN);
   }
 }

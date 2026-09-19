@@ -1,10 +1,10 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="ru">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="dark">
-  <meta name="description" content="ESP32 Weather Station — цифры, горизонтальные шкалы, столбцы, круговые шкалы и история измерений">
+  <meta name="description" content="ESP32 Weather Station — numeric, horizontal, bars, gauges and history views.">
   <!-- Inline data URI: no favicon request leaves the device (fully offline). -->
   <link rel="icon" href="data:,">
   <title>ESP32 Weather Station</title>
@@ -403,7 +403,7 @@
     .track[data-nodata="true"] .track__fill,
     .track[data-nodata="true"] .track__knob { display: none; }
     .track[data-nodata="true"]::after {
-      content: "нет данных";
+      content: var(--nodata-text, "no data");
       position: absolute;
       inset: 0;
       display: flex;
@@ -751,6 +751,99 @@
       color: var(--text-muted);
     }
     .app__footer b { color: var(--text); font-weight: 600; }
+    /* ---------------------------------------------------------------- */
+    /* Language selection: the first screen on every start. The dashboard  */
+    /* stays hidden until a language is chosen (no persistence).           */
+    /* ---------------------------------------------------------------- */
+    .langscreen {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 16px;
+      background: radial-gradient(120% 120% at 20% 0%, #16233c 0%, #0b1220 55%, #070c16 100%);
+      z-index: 40;
+    }
+
+    .langscreen[hidden] { display: none; }
+
+    .langscreen__panel {
+      width: min(420px, 100%);
+      padding: 22px 20px 18px;
+      display: grid;
+      gap: 10px;
+      text-align: center;
+      animation: langscreen-in 240ms ease-out both;
+    }
+
+    @keyframes langscreen-in {
+      from { opacity: 0; transform: translateY(8px) scale(0.99); }
+      to   { opacity: 1; transform: none; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .langscreen__panel { animation-duration: 1ms; }
+    }
+
+    .langscreen__title {
+      margin: 0;
+      font-size: 1.35rem;
+      font-weight: 650;
+      letter-spacing: 0.2px;
+      color: var(--text, #eef4ff);
+    }
+
+    .langscreen__instruction {
+      margin: 0 0 6px;
+      font-size: 0.95rem;
+      color: var(--muted, #9fb2cc);
+    }
+
+    .langbutton {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 54px;
+      padding: 0 18px;
+      border-radius: 14px;
+      border: 1px solid rgba(67, 209, 158, 0.55);
+      background: linear-gradient(120deg, rgba(47, 211, 192, 0.22), rgba(67, 209, 158, 0.14));
+      color: var(--text, #eef4ff);
+      font: inherit;
+      font-size: 1.05rem;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+      cursor: pointer;
+      transition: transform 120ms ease, box-shadow 140ms ease, background 140ms ease;
+    }
+
+    .langbutton__code {
+      font-size: 0.8rem;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      color: rgba(238, 244, 255, 0.6);
+      text-transform: uppercase;
+    }
+
+    .langbutton:hover,
+    .langbutton:focus-visible {
+      background: linear-gradient(120deg, rgba(47, 211, 192, 0.34), rgba(67, 209, 158, 0.22));
+      box-shadow: 0 10px 26px rgba(47, 211, 192, 0.22), 0 0 0 1px rgba(67, 209, 158, 0.5) inset;
+      outline: none;
+    }
+
+    .langbutton:active { transform: translateY(1px); }
+
+    .langscreen__hint {
+      margin: 4px 0 0;
+      font-size: 0.8rem;
+      line-height: 1.35;
+      color: rgba(159, 178, 204, 0.85);
+    }
+
+    .app[hidden] { display: none; }
+
     .note { margin: 0; font-size: 0.74rem; color: var(--text-muted); overflow-wrap: anywhere; }
 
     @media (max-width: 380px) {
@@ -816,34 +909,48 @@
     </symbol>
   </defs></svg>
 
-  <main class="app">
+  <section class="langscreen" id="language-screen" aria-labelledby="language-title">
+    <div class="langscreen__panel glass">
+      <h1 class="langscreen__title" id="language-title" data-i18n="app_title">ESP32 Weather Station</h1>
+      <p class="langscreen__instruction" data-i18n="choose_language">Choose a language</p>
+      <button class="langbutton" type="button" id="lang-ru" data-locale="ru">
+        <span>РУССКИЙ</span><span class="langbutton__code">ru</span>
+      </button>
+      <button class="langbutton" type="button" id="lang-en" data-locale="en">
+        <span>ENGLISH</span><span class="langbutton__code">en</span>
+      </button>
+      <p class="langscreen__hint" data-i18n="language_hint"></p>
+    </div>
+  </section>
+
+  <main class="app" id="app-shell" hidden>
     <header class="app__header">
       <div class="brand">
         <span class="brand__icon" aria-hidden="true">
           <svg class="icon" width="26" height="26"><use href="#i-network"/></svg>
         </span>
-        <h1>ESP32 Weather Station</h1>
+        <h1 data-i18n="app_title">ESP32 Weather Station</h1>
       </div>
       <div class="connection glass" id="connection" data-state="OFFLINE" role="status" aria-live="polite">
         <span class="connection__dot" aria-hidden="true"></span>
         <span class="connection__label" id="connection-label">OFFLINE</span>
-        <span class="connection__meta" id="connection-meta">обновление: —</span>
+        <span class="connection__meta" id="connection-meta"></span>
       </div>
     </header>
 
     <!-- Five presentation modes of ONE dashboard (no separate pages). -->
-    <nav class="tabs glass" role="tablist" aria-label="Режим отображения" id="tabs">
+    <nav class="tabs glass" role="tablist" aria-label="Mode" data-i18n-aria="tablist_aria" id="tabs">
       <span class="tabs__indicator" id="tabs-indicator" aria-hidden="true"></span>
       <button class="tab" type="button" role="tab" id="tab-numeric" aria-controls="panel-numeric"
-              aria-selected="true" tabindex="0" data-mode="numeric">Цифры</button>
+              aria-selected="true" tabindex="0" data-mode="numeric" data-i18n="tab_numeric">NUMERIC</button>
       <button class="tab" type="button" role="tab" id="tab-horizontal" aria-controls="panel-horizontal"
-              aria-selected="false" tabindex="-1" data-mode="horizontal">Горизонтальные</button>
+              aria-selected="false" tabindex="-1" data-mode="horizontal" data-i18n="tab_horizontal">HORIZONTAL</button>
       <button class="tab" type="button" role="tab" id="tab-bars" aria-controls="panel-bars"
-              aria-selected="false" tabindex="-1" data-mode="bars">Столбцы</button>
+              aria-selected="false" tabindex="-1" data-mode="bars" data-i18n="tab_bars">BARS</button>
       <button class="tab" type="button" role="tab" id="tab-gauges" aria-controls="panel-gauges"
-              aria-selected="false" tabindex="-1" data-mode="gauges">Шкалы</button>
+              aria-selected="false" tabindex="-1" data-mode="gauges" data-i18n="tab_gauges">GAUGES</button>
       <button class="tab" type="button" role="tab" id="tab-history" aria-controls="panel-history"
-              aria-selected="false" tabindex="-1" data-mode="history">История</button>
+              aria-selected="false" tabindex="-1" data-mode="history" data-i18n="tab_history">HISTORY</button>
     </nav>
 
     <!-- Panels are filled once by buildPanels(); polling only updates values. -->
@@ -856,21 +963,203 @@
     </section>
 
     <footer class="app__footer">
-      <span>uptime ESP32: <b id="uptime">—</b></span>
-      <span>опрос UI: <b id="poll-interval">—</b></span>
-      <span>источник: <b>GET /api/weather</b></span>
-      <span>история: <b>в памяти вкладки</b></span>
+      <span><span data-i18n="uptime"></span>: <b id="uptime">—</b></span>
+      <span><span data-i18n="poll_interval"></span>: <b id="poll-interval">—</b></span>
+      <span><span data-i18n="source"></span>: <b>GET /api/weather</b></span>
+      <span><span data-i18n="history"></span>: <b data-i18n="history_in_memory"></b></span>
     </footer>
 
-    <p class="note">
-      Один dashboard, пять режимов. Переключение вкладок не выполняет запросов: рендерер получает тот же
-      uiModel, что и polling. История собирается на клиенте из ответов /api/weather и живёт только в памяти
-      этой страницы. LVGL/ILI9341 — отдельная итерация.
-    </p>
+    <p class="note" data-i18n="note_paragraph"></p>
   </main>
 
   <script>
     'use strict';
+
+    /* =====================================================================
+       Layer 0 — localization (RU / EN).
+
+       Application state, shared with the LVGL renderer through the same key
+       names (firmware repo: include/i18n.h). Rules:
+         * locale ids are exactly 'ru' and 'en' — nowhere else in the code;
+         * on every start the locale is null and the language screen is shown;
+           the dashboard is NOT rendered or polled before a choice is made;
+         * nothing is persisted (no localStorage): the next start asks again;
+         * every label is looked up BY KEY, never with a per-call if/else;
+         * numbers and units are data: '25.4', '°C', '%', 'hPa' are never
+           translated, and semantic role ids never become labels.
+       ===================================================================== */
+    const LOCALES = ['ru', 'en'];
+    const DEFAULT_TEXT_LOCALE = 'en';
+
+    const I18N = {
+      ru: {
+        app_title: 'ESP32 Погодная станция',
+        choose_language: 'Выберите язык',
+        language_hint: 'Язык интерфейса спрашивается заново при каждом запуске: выбор не сохраняется.',
+        tablist_aria: 'Режим отображения',
+        tab_numeric: 'Цифры',
+        tab_horizontal: 'Горизонтальные',
+        tab_bars: 'Столбцы',
+        tab_gauges: 'Шкалы',
+        tab_history: 'История',
+        temperature: 'Температура',
+        humidity: 'Влажность',
+        pressure: 'Давление',
+        fresh: 'СВЕЖО',
+        stale: 'УСТАРЕЛО',
+        error: 'ОШИБКА',
+        online: 'ОНЛАЙН',
+        offline: 'ОФЛАЙН',
+        live: 'LIVE',
+        demo: 'DEMO',
+        updated: 'обновлено',
+        last_update: 'обновление',
+        data_age: 'возраст данных',
+        source: 'источник',
+        uptime: 'uptime ESP32',
+        poll_interval: 'опрос UI',
+        history: 'История',
+        history_in_memory: 'в памяти вкладки',
+        retention: 'Хранение',
+        clear_history: 'Очистить историю',
+        clear_history_confirm: 'Подтвердить очистку',
+        collecting_history: 'Собираем историю…',
+        points: 'точек',
+        window: 'окно',
+        now: 'сейчас',
+        seconds: 'с',
+        minutes: 'мин',
+        hours: 'ч',
+        milliseconds: 'мс',
+        age: 'возраст',
+        scale: 'шкала',
+        no_data: 'нет данных',
+        no_response: 'нет ответа',
+        note_paragraph:
+          'Один dashboard, пять режимов. Переключение вкладок не выполняет запросов: рендерер получает ' +
+          'тот же uiModel, что и polling. История собирается на клиенте из ответов /api/weather и живёт ' +
+          'только в памяти этой страницы. LVGL/ILI9341 — отдельная итерация.',
+        meta_description: 'ESP32 Weather Station — цифры, горизонтальные шкалы, столбцы, круговые шкалы и история.',
+        wait_update: 'обновление: ожидание…',
+        error_prefix: 'последнее',
+        error_suffix: 'ошибка',
+        network_down: 'сеть недоступна',
+        ago: 'назад',
+        retention_label: 'Период хранения истории',
+        chips_aria: 'Быстрый выбор периода истории',
+        chart_aria: 'График истории. Стрелки влево и вправо перемещают курсор по точкам.',
+        chart_aria_empty: 'История измерений: пока нет точек. Первые точки появятся после получения данных.',
+        chart_aria_summary: 'История измерений',
+        empty_title: 'Собираем историю…',
+        empty_hint: 'Первые точки появятся после получения данных от метеостанции.',
+        last_points: 'Последние точки истории',
+        table_caption: 'История измерений (текстовая альтернатива графику)',
+        table_time: 'Время',
+        table_temperature: 'Температура, °C',
+        table_humidity: 'Влажность, %',
+        table_pressure: 'Давление, hPa',
+        table_state: 'Состояние',
+        history_hint:
+          'История живёт в памяти этой вкладки (не в ESP32) и собирается из тех же ответов /api/weather — ' +
+          'отдельного запроса и таймера нет. Смена периода пересобирает буфер.',
+        from_to: 'от',
+        collection_period: 'за',
+        step: 'шаг',
+        collected: 'собрано'
+      },
+      en: {
+        app_title: 'ESP32 Weather Station',
+        choose_language: 'Choose a language',
+        language_hint: 'The interface language is asked again on every start: the choice is not saved.',
+        tablist_aria: 'Display mode',
+        tab_numeric: 'NUMERIC',
+        tab_horizontal: 'HORIZONTAL',
+        tab_bars: 'BARS',
+        tab_gauges: 'GAUGES',
+        tab_history: 'HISTORY',
+        temperature: 'Temperature',
+        humidity: 'Humidity',
+        pressure: 'Pressure',
+        fresh: 'FRESH',
+        stale: 'STALE',
+        error: 'ERROR',
+        online: 'ONLINE',
+        offline: 'OFFLINE',
+        live: 'LIVE',
+        demo: 'DEMO',
+        updated: 'updated',
+        last_update: 'last update',
+        data_age: 'data age',
+        source: 'source',
+        uptime: 'ESP32 uptime',
+        poll_interval: 'UI polling',
+        history: 'History',
+        history_in_memory: 'in this tab',
+        retention: 'Retention',
+        clear_history: 'Clear history',
+        clear_history_confirm: 'Confirm clearing',
+        collecting_history: 'Collecting history…',
+        points: 'points',
+        window: 'window',
+        now: 'now',
+        seconds: 's',
+        minutes: 'min',
+        hours: 'h',
+        milliseconds: 'ms',
+        age: 'age',
+        scale: 'scale',
+        no_data: 'no data',
+        no_response: 'no response',
+        note_paragraph:
+          'One dashboard, five modes. Switching tabs performs no requests: every renderer gets the same ' +
+          'uiModel as the polling loop. History is collected in the browser from /api/weather responses ' +
+          'and lives only in this tab. LVGL/ILI9341 is a separate iteration.',
+        meta_description: 'ESP32 Weather Station — numeric, horizontal, bars, gauges and history views.',
+        wait_update: 'last update: waiting…',
+        error_prefix: 'last',
+        error_suffix: 'error',
+        network_down: 'network unreachable',
+        ago: 'ago',
+        retention_label: 'History retention period',
+        chips_aria: 'Quick history period selection',
+        chart_aria: 'History chart. Left and right arrows move the cursor between points.',
+        chart_aria_empty: 'Measurement history: no points yet. The first points appear once data arrives.',
+        chart_aria_summary: 'Measurement history',
+        empty_title: 'Collecting history…',
+        empty_hint: 'The first points appear once the station returns data.',
+        last_points: 'Latest history points',
+        table_caption: 'Measurement history (text alternative to the chart)',
+        table_time: 'Time',
+        table_temperature: 'Temperature, °C',
+        table_humidity: 'Humidity, %',
+        table_pressure: 'Pressure, hPa',
+        table_state: 'State',
+        history_hint:
+          'History lives in this tab (not in the ESP32) and is collected from the same /api/weather ' +
+          'responses — there is no separate request or timer. Changing the period rebuilds the buffer.',
+        from_to: 'from',
+        collection_period: 'over',
+        step: 'step',
+        collected: 'collected'
+      }
+    };
+
+    /* Active locale: null = nothing chosen yet (first-run state). */
+    let activeLocale = null;
+
+    function textLocale() { return activeLocale || DEFAULT_TEXT_LOCALE; }
+
+    /* The single translation lookup used by the whole page. */
+    function t(key) {
+      const catalog = I18N[textLocale()] || I18N[DEFAULT_TEXT_LOCALE];
+      const value = catalog[key];
+      if (value === undefined) {
+        return I18N[DEFAULT_TEXT_LOCALE][key] !== undefined ? I18N[DEFAULT_TEXT_LOCALE][key] : key;
+      }
+      return value;
+    }
+
+    function isLocale(id) { return LOCALES.indexOf(id) !== -1; }
 
     /* =====================================================================
        Layer 1 — configuration. All thresholds, ranges, intervals and history
@@ -893,15 +1182,15 @@
 
     const METRIC_CONFIG = {
       temperature: {
-        key: 'temperature', label: 'Температура', unit: '°C', source: 'BMP280', icon: 'i-temp',
+        key: 'temperature', label: '', unit: '°C', source: 'BMP280', icon: 'i-temp',
         range: { min: -10, max: 40 }, ticks: [-10, 0, 10, 20, 30, 40], decimals: 1
       },
       humidity: {
-        key: 'humidity', label: 'Влажность', unit: '%', source: 'DHT11', icon: 'i-humidity',
+        key: 'humidity', label: '', unit: '%', source: 'DHT11', icon: 'i-humidity',
         range: { min: 0, max: 100 }, ticks: [0, 25, 50, 75, 100], decimals: 0
       },
       pressure: {
-        key: 'pressure', label: 'Давление', unit: 'hPa', source: 'BMP280', icon: 'i-pressure',
+        key: 'pressure', label: '', unit: 'hPa', source: 'BMP280', icon: 'i-pressure',
         range: { min: 950, max: 1050 }, ticks: [950, 975, 1000, 1025, 1050], decimals: 1
       }
     };
@@ -922,17 +1211,17 @@
       axisTicks: 5,
       numberTweenMs: 220,
       presets: [
-        { id: '10s', label: '10 с', retentionMs: 10 * 1000, sampleMs: 1000, maxPoints: 14 },
-        { id: '30s', label: '30 с', retentionMs: 30 * 1000, sampleMs: 1000, maxPoints: 34 },
-        { id: '1m', label: '1 мин', retentionMs: 60 * 1000, sampleMs: 2000, maxPoints: 34 },
-        { id: '5m', label: '5 мин', retentionMs: 300 * 1000, sampleMs: 5000, maxPoints: 64 },
-        { id: '15m', label: '15 мин', retentionMs: 900 * 1000, sampleMs: 10000, maxPoints: 94 },
-        { id: '30m', label: '30 мин', retentionMs: 1800 * 1000, sampleMs: 15000, maxPoints: 124 },
-        { id: '1h', label: '1 ч', retentionMs: 3600 * 1000, sampleMs: 30000, maxPoints: 124 },
-        { id: '3h', label: '3 ч', retentionMs: 3 * 3600 * 1000, sampleMs: 60000, maxPoints: 184 },
-        { id: '6h', label: '6 ч', retentionMs: 6 * 3600 * 1000, sampleMs: 120000, maxPoints: 184 },
-        { id: '12h', label: '12 ч', retentionMs: 12 * 3600 * 1000, sampleMs: 300000, maxPoints: 148 },
-        { id: '24h', label: '24 ч', retentionMs: 24 * 3600 * 1000, sampleMs: 300000, maxPoints: 292 }
+        { id: '10s', label: '', retentionMs: 10 * 1000, sampleMs: 1000, maxPoints: 14 },
+        { id: '30s', label: '', retentionMs: 30 * 1000, sampleMs: 1000, maxPoints: 34 },
+        { id: '1m', label: '', retentionMs: 60 * 1000, sampleMs: 2000, maxPoints: 34 },
+        { id: '5m', label: '', retentionMs: 300 * 1000, sampleMs: 5000, maxPoints: 64 },
+        { id: '15m', label: '', retentionMs: 900 * 1000, sampleMs: 10000, maxPoints: 94 },
+        { id: '30m', label: '', retentionMs: 1800 * 1000, sampleMs: 15000, maxPoints: 124 },
+        { id: '1h', label: '', retentionMs: 3600 * 1000, sampleMs: 30000, maxPoints: 124 },
+        { id: '3h', label: '', retentionMs: 3 * 3600 * 1000, sampleMs: 60000, maxPoints: 184 },
+        { id: '6h', label: '', retentionMs: 6 * 3600 * 1000, sampleMs: 120000, maxPoints: 184 },
+        { id: '12h', label: '', retentionMs: 12 * 3600 * 1000, sampleMs: 300000, maxPoints: 148 },
+        { id: '24h', label: '', retentionMs: 24 * 3600 * 1000, sampleMs: 300000, maxPoints: 292 }
       ],
       // Per-metric Y scale. Never one shared 0..max scale: pressure would then
       // look like it swings wildly. minSpan prevents false drama on tiny changes.
@@ -985,6 +1274,10 @@
       tickerId: null,
       historyPresetId: HISTORY_CONFIG.defaultPresetId,
       hoverIndex: -1,
+      /* Localization state: null until the user chooses (first-run state). */
+      locale: null,
+      screen: 'language-selection',
+      dashboardReady: false,
       clearArmed: false
     };
 
@@ -1178,12 +1471,12 @@
     }
 
     function formatAge(ageMs) {
-      if (ageMs === null || ageMs === undefined || !isFinite(ageMs)) { return 'нет данных'; }
-      if (ageMs < 1000) { return Math.round(ageMs) + ' мс'; }
-      if (ageMs < 60000) { return (ageMs / 1000).toFixed(1) + ' с'; }
+      if (ageMs === null || ageMs === undefined || !isFinite(ageMs)) { return t('no_data'); }
+      if (ageMs < 1000) { return Math.round(ageMs) + ' ' + t('milliseconds'); }
+      if (ageMs < 60000) { return (ageMs / 1000).toFixed(1) + ' ' + t('seconds'); }
       const minutes = Math.floor(ageMs / 60000);
       const seconds = Math.round((ageMs % 60000) / 1000);
-      return minutes + ' мин ' + seconds + ' с';
+      return minutes + ' ' + t('minutes') + ' ' + seconds + ' ' + t('seconds');
     }
 
     function formatMetricValue(state) {
@@ -1199,15 +1492,15 @@
       const hours = Math.floor(totalSeconds / 3600);
       const minutes = Math.floor((totalSeconds % 3600) / 60);
       const seconds = totalSeconds % 60;
-      if (hours > 0) { return hours + ' ч ' + minutes + ' мин ' + seconds + ' с'; }
-      if (minutes > 0) { return minutes + ' мин ' + seconds + ' с'; }
-      return seconds + ' с';
+      if (hours > 0) { return hours + ' ' + t('hours') + ' ' + minutes + ' ' + t('minutes') + ' ' + seconds + ' ' + t('seconds'); }
+      if (minutes > 0) { return minutes + ' ' + t('minutes') + ' ' + seconds + ' ' + t('seconds'); }
+      return seconds + ' ' + t('seconds');
     }
 
     function formatDurationShort(ms) {
-      if (ms < 60 * 1000) { return Math.round(ms / 1000) + ' с'; }
-      if (ms < 3600 * 1000) { return Math.round(ms / 60000) + ' мин'; }
-      return Math.round(ms / 3600000) + ' ч';
+      if (ms < 60 * 1000) { return Math.round(ms / 1000) + ' ' + t('seconds'); }
+      if (ms < 3600 * 1000) { return Math.round(ms / 60000) + ' ' + t('minutes'); }
+      return Math.round(ms / 3600000) + ' ' + t('hours');
     }
 
     function formatClock(timestampMs, withSeconds) {
@@ -1670,8 +1963,8 @@
     }
 
     function scaleFootMarkup(metric) {
-      return '<span>возраст: <b data-role="age">—</b></span>' +
-        '<span>шкала: <b>' + metric.rangeMin + '…' + metric.rangeMax + ' ' + metric.unit + '</b></span>';
+      return '<span>' + t('age') + ': <b data-role="age">—</b></span>' +
+        '<span>' + t('scale') + ': <b>' + metric.rangeMin + '…' + metric.rangeMax + ' ' + metric.unit + '</b></span>';
     }
 
     function numericMarkup(metric) {
@@ -1733,8 +2026,8 @@
           '</div>' +
         '</div>' +
         '<div class="bcol__value"><b data-role="value">—</b><i>' + metric.unit + '</i></div>' +
-        '<div class="bcol__range">шкала ' + metric.rangeMin + '…' + metric.rangeMax + ' ' + metric.unit + '</div>' +
-        '<p class="card__foot"><span>возраст: <b data-role="age">—</b></span></p>' +
+        '<div class="bcol__range">' + t('scale') + ' ' + metric.rangeMin + '…' + metric.rangeMax + ' ' + metric.unit + '</div>' +
+        '<p class="card__foot"><span>' + t('age') + ': <b data-role="age">—</b></span></p>' +
       '</div>';
     }
 
@@ -1755,8 +2048,8 @@
           '<text class="gauge__unit" x="' + geometry.cx + '" y="94">' + metric.unit + '</text>' +
         '</svg>' +
         '<div class="gauge__meta"><h2 class="card__title">' + metric.label + '</h2>' + badgeMarkup() + '</div>' +
-        '<p class="gauge__scale">шкала ' + metric.rangeMin + '…' + metric.rangeMax + ' ' + metric.unit +
-          ' · возраст: <b data-role="age">—</b></p>' +
+        '<p class="gauge__scale">' + t('scale') + ' ' + metric.rangeMin + '…' + metric.rangeMax + ' ' + metric.unit +
+          ' · ' + t('age') + ': <b data-role="age">—</b></p>' +
       '</article>';
     }
 
@@ -1779,33 +2072,33 @@
       return '<div class="history glass" data-role="history">' +
         '<header class="history__head">' +
           '<div class="history__title">' +
-            '<h2>История</h2>' +
-            '<p class="history__sub" data-role="summary">Собираем историю…</p>' +
+            '<h2>' + t('history') + '</h2>' +
+            '<p class="history__sub" data-role="summary">' + t('collecting_history') + '</p>' +
           '</div>' +
           '<div class="history__actions">' +
-            '<label class="visually-hidden" for="history-retention">Период хранения истории</label>' +
+            '<label class="visually-hidden" for="history-retention" data-i18n="retention_label"></label>' +
             '<select class="history__select" id="history-retention" data-role="retention-select"></select>' +
-            '<button type="button" class="btn" data-role="clear">Очистить историю</button>' +
+            '<button type="button" class="btn" data-role="clear">' + t('clear_history') + '</button>' +
           '</div>' +
         '</header>' +
-        '<div class="chips" role="group" aria-label="Быстрый выбор периода истории" data-role="chips">' + chips + '</div>' +
+        '<div class="chips" role="group" aria-label="' + t('chips_aria') + '" data-role="chips">' + chips + '</div>' +
         '<p class="history__hint" data-role="hint"></p>' +
         '<div class="chart" data-role="chart" tabindex="0" role="group"' +
-          ' aria-label="График истории. Стрелки влево и вправо перемещают курсор по точкам.">' +
-          '<svg class="chart__svg" data-role="chart-svg" role="img" aria-label="История измерений"></svg>' +
+          ' aria-label="' + t('chart_aria') + '">' +
+          '<svg class="chart__svg" data-role="chart-svg" role="img" aria-label="' + t('chart_aria_summary') + '"></svg>' +
           '<div class="chart__tooltip" data-role="tooltip" hidden>' +
             '<div class="tt__time" data-role="tt-time">—</div>' + rows +
           '</div>' +
         '</div>' +
         '<p class="chart__empty" data-role="empty" hidden>' +
-          '<b>Собираем историю…</b>' +
-          '<span>Первые точки появятся после получения данных от метеостанции.</span>' +
+          '<b>' + t('empty_title') + '</b>' +
+          '<span>' + t('empty_hint') + '</span>' +
         '</p>' +
         '<div class="history__table visually-hidden" data-role="table-wrap">' +
-          '<h3>Последние точки истории</h3>' +
-          '<table><caption>История измерений (текстовая альтернатива графику)</caption>' +
-            '<thead><tr><th scope="col">Время</th><th scope="col">Температура, °C</th>' +
-            '<th scope="col">Влажность, %</th><th scope="col">Давление, hPa</th><th scope="col">Состояние</th></tr></thead>' +
+          '<h3>' + t('last_points') + '</h3>' +
+          '<table><caption>' + t('table_caption') + '</caption>' +
+            '<thead><tr><th scope="col">' + t('table_time') + '</th><th scope="col">' + t('table_temperature') + '</th>' +
+            '<th scope="col">' + t('table_humidity') + '</th><th scope="col">' + t('table_pressure') + '</th><th scope="col">' + t('table_state') + '</th></tr></thead>' +
             '<tbody data-role="table-body"></tbody></table>' +
         '</div>' +
       '</div>';
@@ -1973,14 +2266,14 @@
       let meta;
       if (uiState.lastSuccessAt === null) {
         meta = uiState.lastErrorMessage
-          ? 'нет связи (' + uiState.lastErrorMessage + ')'
-          : 'обновление: ожидание…';
+          ? t('no_response') + ' (' + uiState.lastErrorMessage + ')'
+          : t('wait_update');
       } else if (online) {
-        meta = 'обновление: ' + formatClock(uiState.lastSuccessAt, true) +
-          ' (' + formatAge(Date.now() - uiState.lastSuccessAt) + ' назад)';
+        meta = t('last_update') + ': ' + formatClock(uiState.lastSuccessAt, true) +
+          ' (' + formatAge(Date.now() - uiState.lastSuccessAt) + ' ' + t('ago') + ')';
       } else {
-        meta = 'последнее: ' + formatClock(uiState.lastSuccessAt, true) +
-          ' · ошибка: ' + (uiState.lastErrorMessage || 'сеть недоступна');
+        meta = t('error_prefix') + ': ' + formatClock(uiState.lastSuccessAt, true) +
+          ' · ' + t('error_suffix') + ': ' + (uiState.lastErrorMessage || t('network_down'));
       }
       setText(dom.connectionMeta, meta);
 
@@ -1990,7 +2283,7 @@
       if (dom.pollInterval) {
         const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
         setText(dom.pollInterval,
-          (hidden ? APP_CONFIG.pollIntervalHiddenMs : APP_CONFIG.pollIntervalMs) + ' мс');
+          (hidden ? APP_CONFIG.pollIntervalHiddenMs : APP_CONFIG.pollIntervalMs) + ' ' + t('milliseconds'));
       }
     }
 
@@ -2305,16 +2598,16 @@
 
     function historyAriaLabel(series) {
       if (series.count === 0) {
-        return 'История измерений: пока нет точек. Первые точки появятся после получения данных.';
+        return t('chart_aria_empty');
       }
       const parts = METRIC_KEYS.map(function (key) {
         const metric = series.metrics[key];
-        if (metric.min === null) { return METRIC_CONFIG[key].label + ': нет данных'; }
+        if (metric.min === null) { return METRIC_CONFIG[key].label + ': ' + t('no_data'); }
         const decimals = METRIC_CONFIG[key].decimals;
-        return METRIC_CONFIG[key].label + ' от ' + metric.min.toFixed(decimals) + ' до ' +
+        return METRIC_CONFIG[key].label + ' ' + t('from_to') + ' ' + metric.min.toFixed(decimals) + ' — ' +
           metric.max.toFixed(decimals) + ' ' + METRIC_CONFIG[key].unit;
       });
-      return 'История измерений: ' + series.count + ' точек за ' +
+      return t('chart_aria_summary') + ': ' + series.count + ' ' + t('points') + ' ' + t('collection_period') + ' ' +
         formatDurationShort(series.tMax - series.tMin) + '. ' + parts.join('. ') + '.';
     }
 
@@ -2411,12 +2704,11 @@
       });
 
       const stepText = preset.sampleMs >= 60000
-        ? (preset.sampleMs / 60000) + ' мин'
-        : (preset.sampleMs / 1000) + ' с';
-      setText(refs.summary, 'Хранение: ' + preset.label + ' · шаг ' + stepText + ' · точек ' +
-        history.count + '/' + history.capacity + ' · собрано ' + history.totalSamples);
-      setText(refs.hint, 'История живёт в памяти этой вкладки (не в ESP32) и собирается из тех же ' +
-        'ответов /api/weather — отдельного запроса и таймера нет. Смена периода пересобирает буфер.');
+        ? (preset.sampleMs / 60000) + ' ' + t('minutes')
+        : (preset.sampleMs / 1000) + ' ' + t('seconds');
+      setText(refs.summary, t('retention') + ': ' + preset.label + ' · ' + t('step') + ' ' + stepText + ' · ' + t('points') + ' ' +
+        history.count + '/' + history.capacity + ' · ' + t('collected') + ' ' + history.totalSamples);
+      setText(refs.hint, t('history_hint'));
 
       const isEmpty = history.count === 0;
       refs.empty.hidden = !isEmpty;
@@ -2425,7 +2717,7 @@
       if (isEmpty) {
         uiState.hoverIndex = -1;
         refs.tooltip.hidden = true;
-        setText(refs.summary, 'Собираем историю… Период: ' + preset.label + ' · шаг ' + stepText);
+        setText(refs.summary, t('collecting_history') + ' ' + t('retention') + ': ' + preset.label + ' · ' + t('step') + ' ' + stepText);
         renderHistoryTable(series);
         return;
       }
@@ -2454,20 +2746,20 @@
       if (!uiState.clearArmed) {
         uiState.clearArmed = true;
         button.dataset.armed = 'true';
-        button.textContent = 'Подтвердить очистку';
+        button.textContent = t('clear_history_confirm');
         if (uiState.clearTimer) { clearTimeout(uiState.clearTimer); }
         uiState.clearTimer = setTimeout(function () {
           uiState.clearArmed = false;
           uiState.clearTimer = null;
           button.dataset.armed = 'false';
-          button.textContent = 'Очистить историю';
+          button.textContent = t('clear_history');
         }, 4000);
         return;
       }
       if (uiState.clearTimer) { clearTimeout(uiState.clearTimer); uiState.clearTimer = null; }
       uiState.clearArmed = false;
       button.dataset.armed = 'false';
-      button.textContent = 'Очистить историю';
+      button.textContent = t('clear_history');
       resetHistory();
       dom.refs.history.tableSignature = '';
       renderHistory(uiState.uiModel);
@@ -2654,14 +2946,89 @@
       dom.pollInterval = document.getElementById('poll-interval');
     }
 
-    function init() {
-      cacheDom();
+    /* =====================================================================
+       Layer 14 — localization application.
+
+       applyLocale() paints every localized string from the catalog: static
+       markup through [data-i18n]/[data-i18n-aria], generated markup because the
+       panels are rebuilt from the configured labels. Numbers and units are not
+       touched: only the catalog carries words.
+       ===================================================================== */
+    function retentionText(ms) {
+      if (ms < 60 * 1000) { return (ms / 1000) + ' ' + t('seconds'); }
+      if (ms < 3600 * 1000) { return (ms / 60000) + ' ' + t('minutes'); }
+      return (ms / 3600000) + ' ' + t('hours');
+    }
+
+    function applyLocale() {
+      if (typeof document === 'undefined') { return; }
+      /* CSS-generated text (the "[data-nodata]" placeholder) follows the locale. */
+      document.documentElement.style.setProperty('--nodata-text', '"' + t('no_data') + '"');
+
+      Array.prototype.forEach.call(document.querySelectorAll('[data-i18n]'), function (node) {
+        node.textContent = t(node.getAttribute('data-i18n'));
+      });
+      Array.prototype.forEach.call(document.querySelectorAll('[data-i18n-aria]'), function (node) {
+        node.setAttribute('aria-label', t(node.getAttribute('data-i18n-aria')));
+      });
+      const description = document.querySelector('meta[name="description"]');
+      if (description) { description.setAttribute('content', t('meta_description')); }
+
+      /* Metric labels and retention preset labels are data-driven: the catalog
+         supplies the words, the numbers stay as they are. */
+      METRIC_KEYS.forEach(function (key) { METRIC_CONFIG[key].label = t(key); });
+      HISTORY_CONFIG.presets.forEach(function (preset) {
+        preset.label = retentionText(preset.retentionMs);
+      });
+
+      if (uiState.dashboardReady) {
+        buildPanels();
+        renderCurrentMode();
+        renderConnectionState();
+      }
+    }
+
+    /* Language selection: the first screen on every start. No persistence and no
+       network request — the dashboard is built and polled only after the choice. */
+    function chooseLocale(id) {
+      if (!isLocale(id)) { return null; }
+      activeLocale = id;
+      uiState.locale = id;
+      uiState.screen = 'dashboard';
+
+      const screen = document.getElementById('language-screen');
+      const shell = document.getElementById('app-shell');
+      if (screen) { screen.hidden = true; }
+      if (shell) { shell.hidden = false; }
+      applyLocale();
+      enterDashboard();
+      return id;
+    }
+
+    function wireLanguageScreen() {
+      if (typeof document === 'undefined') { return; }
+      const buttons = document.querySelectorAll('.langbutton[data-locale]');
+      Array.prototype.forEach.call(buttons, function (button) {
+        button.addEventListener('click', function () { chooseLocale(button.dataset.locale); });
+      });
+    }
+
+    /* The dashboard is built and polled only once a language was chosen. */
+    function enterDashboard() {
+      if (uiState.dashboardReady) { return; }
+      uiState.dashboardReady = true;
       buildPanels();
-      initTabs();
-      historyConfigure(HISTORY_CONFIG.defaultPresetId, Date.now());
       setActiveMode(DEFAULT_MODE);
       startUiTicker();
       pollOnce();
+    }
+
+    function init() {
+      cacheDom();
+      initTabs();
+      historyConfigure(HISTORY_CONFIG.defaultPresetId, Date.now());
+      wireLanguageScreen();
+      applyLocale();   /* paints the language screen in the default text locale */
       if (typeof document !== 'undefined' && document.addEventListener) {
         document.addEventListener('visibilitychange', handleVisibilityChange);
         window.addEventListener('resize', handleResize);

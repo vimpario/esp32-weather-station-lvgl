@@ -28,6 +28,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "i18n.h"
+
 namespace Roles {
 constexpr const char* kTempCold = "temp-cold";
 constexpr const char* kTempComfort = "temp-comfort";
@@ -464,6 +466,13 @@ struct DisplayLayout {
   LayoutRect info;
   LayoutRect info_title;
   LayoutRect info_text;
+  /* Language-selection screen (the first screen on every start): a centred glass
+     panel with a title, an instruction, one button per locale and a hint. */
+  LayoutRect lang_panel;
+  LayoutRect lang_title;
+  LayoutRect lang_instruction;
+  LayoutRect lang_button[kLocaleCount];
+  LayoutRect lang_hint;
 };
 
 inline const MetricPresentation* presentationMetricAt(const PresentationModel& model, uint8_t index) {
@@ -502,6 +511,29 @@ inline DisplayLayout computeLayout(DisplayMode mode, const PresentationModel& mo
   const int content_h = height - content_y - margin;
 
   layout.header = makeRect(content_x, margin, content_w, header_h);
+  {
+    /* Language-selection screen: a centred panel that owns the whole screen; the
+       dashboard is not visible while it is up. Two stacked buttons, each at
+       least a comfortable touch target, sized from the geometry. */
+    const int panel_w = content_w - 2 * (content_w / 10);
+    const int panel_x = content_x + (content_w - panel_w) / 2;
+    const int panel_h = height - 2 * (height / 8);
+    const int panel_y = (height - panel_h) / 2;
+    layout.lang_panel = makeRect(panel_x, panel_y, panel_w, panel_h);
+    layout.lang_title = makeRect(panel_x + gutter, panel_y + gutter, panel_w - 2 * gutter,
+                                 panel_h / 6);
+    layout.lang_instruction = makeRect(panel_x + gutter, panel_y + (panel_h * 22) / 100,
+                                       panel_w - 2 * gutter, panel_h / 9);
+    layout.lang_hint = makeRect(panel_x + gutter, panel_y + (panel_h * 34) / 100,
+                                panel_w - 2 * gutter, panel_h / 6);
+    const int button_gap = gutter;
+    const int button_h = scaledPx(0.15f, height, 26);
+    const int buttons_top = panel_y + (panel_h * 52) / 100;
+    layout.lang_button[0] = makeRect(panel_x + gutter * 2, buttons_top, panel_w - 4 * gutter,
+                                     button_h);
+    layout.lang_button[1] = makeRect(panel_x + gutter * 2, buttons_top + button_h + button_gap,
+                                     panel_w - 4 * gutter, button_h);
+  }
   layout.nav = makeRect(content_x, nav_y, content_w, nav_h);
   {
     /* Equal segments: the last one absorbs the rounding remainder so the strip
@@ -684,6 +716,8 @@ inline bool layoutFitsScreen(const DisplayLayout& layout) {
       layout.history_label[0], layout.history_label[1], layout.history_label[2],
       layout.history_lane[0], layout.history_lane[1],   layout.history_lane[2],
       layout.info,            layout.info_title,        layout.info_text,
+      layout.lang_panel,      layout.lang_title,        layout.lang_instruction,
+      layout.lang_button[0],  layout.lang_button[1],    layout.lang_hint,
       layout.history_axis,
   };
   for (size_t i = 0; i < sizeof(rects) / sizeof(rects[0]); ++i) {
