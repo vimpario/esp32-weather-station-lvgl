@@ -2,6 +2,49 @@
 
 Локальная метеостанция на ESP32 NodeMCU-32S с BMP280 + DHT11, веб-интерфейсом в стиле Liquid Glass и переносимым LVGL UI.
 
+## 0. Текущий стабильный статус и release candidate
+
+Состояние на конец итерации финального QA (2026-09-19): весь сквозной путь
+**ESP32 → HTTP API v1 → Web UI / LVGL PC-симулятор** проверен на реальном железе.
+
+| Что | Статус | Чем проверено |
+|---|---|---|
+| Прошивка | стабильна | `pio run -t clean && pio run` → SUCCESS, 0 warnings, RAM 14.1 %, Flash 72.9 % (955 049 B) |
+| HTTP API v1 | стабилен | `curl http://192.168.1.111/api/weather` → 9/9 полей, BMP280/DHT11 valid |
+| Web UI (реальная плата) | стабилен | `node web/tests/device_qa.js` — язык, 5 режимов, история, realtime ≥ 5 мин, 7 разрешений |
+| Web UI (локальный мок) | стабилен | `node web/tests/ui_test.js` (124 проверки) |
+| LVGL симулятор LIVE | стабилен | `live.cmd probe 3`, `--live-frames` (real device, WinHTTP, без browser bridge) |
+| Локализация RU/EN | стабильна | общий каталог ключей (Web + LVGL), кириллические шрифты LVGL |
+| Golden 320×240 | стабильна | `golden.cmd` → 12/12 кадров, точное сравнение (tolerance 0, changed 0, max_delta 0) |
+| Golden 3 разрешения | стабильна | 15/15 кадров (320×240 / 480×320 / 800×480 × 5 режимов) |
+| Git | синхронизирован | firmware и simulator: `main == origin/main`, рабочее дерево clean |
+
+**Команды проверки** (все выполняются из соответствующих каталогов):
+
+```powershell
+# прошивка
+pio run -t clean; pio run; pio run -t upload --upload-port COM3
+
+# Web: реальная плата (нужен доступ в LAN к 192.168.1.111)
+node web/tests/device_qa.js --realtime-minutes 5
+node web/tests/clear_check.js
+
+# Web: локальный мок (сервер + headless Chrome, без платы)
+node web/tests/ui_test.js .
+python web/tests/static_checks.py .
+python web/tests/display_checks.py . ..\esp32-weather-station-sim
+
+# LVGL симулятор
+build.cmd; regression.cmd; golden.cmd; live.cmd probe 3; run.cmd
+```
+
+**LIVE-режим симулятора:** запускается по умолчанию (`live.cmd`, `run.cmd`) и
+обращается напрямую к `http://192.168.1.111/api/weather` через WinHTTP — браузер
+как посредник не используется. Пока идёт опрос, окно показывает `LIVE ONLINE` и
+реальные значения; при недоступности станции остаётся `LIVE OFFLINE` с последним
+снимком и сохранённой историей, а после восстановления связи samples продолжают
+поступать.
+
 ## 1. Зафиксированный pinout
 
 | Датчик | Вывод | ESP32 |
@@ -468,3 +511,28 @@ golden.cmd tolerance 2  # допуск 2/255 на канал (по умолча�
 совпадают с `max_delta = 0` и `changed = 0/76800`. Дополнительно сохраняются 15
 кадров `3 разрешения × 5 режимов` (`--compare-dir`) для проверки геометрии на
 480×320 и 800×480.
+
+## 17. Следующий этап: ILI9341 hardware backend
+
+**NEXT STAGE: ILI9341 hardware backend.**
+
+Физической панели ILI9341 сейчас **нет** — драйвер не написан, GPIO для неё не
+выбраны и не будут выбраны до появления платы.
+
+Что потребуется сообщить после покупки, прежде чем начинать backend:
+
+* точный модуль (маркировка платы);
+* интерфейс (SPI 4-wire / SPI 3-wire / параллельный 8080);
+* распайка/breakout (распиновка модуля, наличие регулятора и level shifter);
+* наличие тачскрина (XPT2046 / FT6236 / нет);
+* разрешение (240×320 или 320×480);
+* контроллер (ILI9341, совместимый, клон);
+* вывод подсветки (BL/LED) и его полярность/ШИМ;
+* вывод сброса (RESET/RST);
+* распайка CS / DC / MOSI / MISO / SCLK.
+
+Только после этих данных выбираются свободные GPIO и добавляется backend
+(`DISPLAY_BACKEND`), при этом общий UI (`include/weather_core.h`,
+`include/lvgl_ui.h`, i18n и golden-регрессия 320×240) переиспользуется как есть:
+LVGL-слой уже отделён от источника данных, а PC-симулятор остаётся референсным
+рендерером для сравнения с панелью.
