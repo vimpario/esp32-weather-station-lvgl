@@ -1,0 +1,2680 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="ESP32 Weather Station — цифры, горизонтальные шкалы, столбцы, круговые шкалы и история измерений">
+  <!-- Inline data URI: no favicon request leaves the device (fully offline). -->
+  <link rel="icon" href="data:,">
+  <title>ESP32 Weather Station</title>
+  <style>
+    /* ==================================================================
+       Presentation only. Semantic colour ROLES (temp-cold, humidity-high,
+       pressure-normal, …) and DATA STATES (FRESH/STALE/ERROR) are produced by
+       JavaScript; CSS decides how each role/state LOOKS.
+       ================================================================== */
+    :root {
+      /* semantic metric + state colours (single source: mirrored in firmware) */
+      --role-temp-cold: #4c9bff;
+      --role-temp-comfort: #43d19e;
+      --role-temp-hot: #ff6b5e;
+      --role-humidity-low: #ffc14d;
+      --role-humidity-comfort: #2fd3c0;
+      --role-humidity-high: #9b7bff;
+      --role-pressure-low: #7f8cff;
+      --role-pressure-normal: #43d19e;
+      --role-pressure-high: #ffa04d;
+
+      --state-fresh: #43d19e;
+      --state-stale: #ffc14d;
+      --state-error: #ff6b5e;
+      --focus: #6fa8ff;
+
+      /* metric identity colours for the history lines (state is added on top) */
+      --metric-temperature: #ff8a5e;
+      --metric-humidity: #2fd3c0;
+      --metric-pressure: #9b8cff;
+
+      --tone: #8fa3bf;
+      --text: #eef4ff;
+      --text-muted: #9fb2cc;
+
+      /* glass surfaces */
+      --glass-1: rgba(255, 255, 255, 0.055);
+      --glass-2: rgba(255, 255, 255, 0.085);
+      --glass-3: rgba(255, 255, 255, 0.13);
+      --line: rgba(255, 255, 255, 0.14);
+      --line-strong: rgba(255, 255, 255, 0.26);
+      --highlight: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+      --shadow-1: 0 10px 28px rgba(0, 0, 0, 0.34);
+      --shadow-2: 0 18px 44px rgba(0, 0, 0, 0.42);
+      --blur: 16px;
+
+      --radius-lg: 24px;
+      --radius-md: 16px;
+      --radius-sm: 10px;
+
+      /* motion */
+      --dur-fast: 140ms;
+      --dur-med: 240ms;
+      --dur-slow: 330ms;
+      --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+      --ease-soft: cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    * { box-sizing: border-box; }
+
+    /* Author styles must not defeat the hidden attribute (e.g. display:flex). */
+    [hidden] { display: none !important; }
+
+    html, body { max-width: 100%; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      padding: clamp(10px, 2.6vw, 26px);
+      background:
+        radial-gradient(120% 90% at 10% -10%, #16233c 0%, transparent 58%),
+        radial-gradient(90% 70% at 100% 0%, rgba(124, 92, 255, 0.18) 0%, transparent 55%),
+        radial-gradient(70% 60% at 50% 110%, rgba(47, 211, 192, 0.10) 0%, transparent 60%),
+        linear-gradient(180deg, #0b1220 0%, #070c16 100%);
+      background-attachment: fixed;
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      font-size: clamp(15px, 1.6vw, 17px);
+      line-height: 1.45;
+      -webkit-text-size-adjust: 100%;
+    }
+
+    .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+    .icon { display: block; width: 24px; height: 24px; color: inherit; }
+    .visually-hidden {
+      position: absolute !important;
+      width: 1px; height: 1px;
+      margin: -1px; padding: 0;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .app {
+      max-width: 1180px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: clamp(10px, 2vw, 20px);
+      min-width: 0;
+    }
+
+    /* ------------------------------------------------------- glass base */
+    .glass {
+      position: relative;
+      background: linear-gradient(180deg, var(--glass-2), var(--glass-1));
+      border: 1px solid var(--line);
+      box-shadow: var(--highlight), var(--shadow-1);
+      backdrop-filter: blur(var(--blur)) saturate(150%);
+      -webkit-backdrop-filter: blur(var(--blur)) saturate(150%);
+    }
+    /* Layered inner highlight for depth. */
+    .glass::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      pointer-events: none;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent 38%);
+      opacity: 0.7;
+    }
+    @supports not ((backdrop-filter: blur(2px)) or (-webkit-backdrop-filter: blur(2px))) {
+      .glass {
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+        background: rgba(18, 28, 46, 0.94);
+      }
+    }
+    @media (prefers-reduced-transparency: reduce) {
+      .glass { backdrop-filter: none; -webkit-backdrop-filter: none; background: rgba(18, 28, 46, 0.94); }
+    }
+
+    /* ------------------------------------------------------------ header */
+    .app__header {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 16px;
+      align-items: center;
+      justify-content: space-between;
+      min-width: 0;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .brand__icon { color: #6fa8ff; flex: none; }
+    .brand h1 {
+      margin: 0;
+      font-size: clamp(1rem, 2.4vw, 1.4rem);
+      font-weight: 650;
+      letter-spacing: 0.01em;
+      overflow-wrap: anywhere;
+    }
+
+    .connection {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      flex-wrap: wrap;
+      padding: 7px 13px;
+      border-radius: 999px;
+      font-size: 0.82rem;
+      min-width: 0;
+    }
+    .connection__dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: var(--state-error);
+      box-shadow: 0 0 0 4px rgba(255, 107, 94, 0.16);
+      flex: none;
+      transition: background var(--dur-med) var(--ease-out), box-shadow var(--dur-med) var(--ease-out);
+    }
+    .connection[data-state="ONLINE"] .connection__dot {
+      background: var(--state-fresh);
+      box-shadow: 0 0 0 4px rgba(67, 209, 158, 0.16);
+    }
+    .connection[data-state="ONLINE"] { animation: onlinePulse var(--dur-slow) var(--ease-out) 1; }
+    @keyframes onlinePulse {
+      0% { box-shadow: var(--highlight), 0 0 0 0 rgba(67, 209, 158, 0.35); }
+      100% { box-shadow: var(--highlight), var(--shadow-1); }
+    }
+    .connection__label { font-weight: 700; letter-spacing: 0.05em; }
+    .connection__meta { color: var(--text-muted); overflow-wrap: anywhere; }
+
+    /* -------------------------------------------------------------- tabs */
+    .tabs {
+      position: relative;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 6px;
+      border-radius: 999px;
+      min-width: 0;
+    }
+    .tabs__indicator {
+      position: absolute;
+      top: 0; left: 0;
+      border-radius: 999px;
+      background: linear-gradient(180deg, var(--glass-3), rgba(255, 255, 255, 0.05));
+      border: 1px solid var(--line-strong);
+      box-shadow: var(--highlight), 0 8px 20px rgba(0, 0, 0, 0.3);
+      pointer-events: none;
+      transition: transform var(--dur-med) var(--ease-out), width var(--dur-med) var(--ease-out),
+                  height var(--dur-med) var(--ease-out), opacity var(--dur-fast) linear;
+      will-change: transform, width;
+    }
+    .tab {
+      position: relative;
+      z-index: 1;
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 9px 12px;
+      border: 1px solid transparent;
+      border-radius: 999px;
+      background: transparent;
+      color: var(--text-muted);
+      font: inherit;
+      font-size: clamp(0.72rem, 2.8vw, 0.92rem);
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      cursor: pointer;
+      white-space: nowrap;
+      -webkit-tap-highlight-color: transparent;
+      transition: color var(--dur-med) var(--ease-out), background var(--dur-med) var(--ease-out),
+                  transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-med) var(--ease-out);
+    }
+    .tab:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22); transform: translateY(-1px); }
+    .tab:active { transform: translateY(0) scale(0.97); transition-duration: 80ms; }
+    .tab[aria-selected="true"] { color: var(--text); background: transparent; }
+    .tab:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+    /* ------------------------------------------------------------ panels */
+    .panels { min-width: 0; }
+    .panel { min-width: 0; }
+    .panel[hidden] { display: none; }
+    .panel:not([hidden]) { animation: panelIn var(--dur-med) var(--ease-out) both; }
+    @keyframes panelIn {
+      from { opacity: 0; transform: translateY(7px) scale(0.995); }
+      to { opacity: 1; transform: none; }
+    }
+
+    .grid {
+      display: grid;
+      gap: clamp(10px, 1.8vw, 18px);
+      grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+      min-width: 0;
+    }
+
+    /* ------------------------------------------------------------- cards */
+    .card {
+      --tone: #8fa3bf;
+      margin: 0;
+      padding: clamp(13px, 2.2vw, 20px);
+      border-radius: var(--radius-lg);
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      min-width: 0;
+      overflow: hidden;
+      transition: opacity var(--dur-med) var(--ease-out), border-color var(--dur-med) var(--ease-out),
+                  transform var(--dur-med) var(--ease-out), box-shadow var(--dur-med) var(--ease-out);
+    }
+    .card:hover { transform: translateY(-2px); box-shadow: var(--highlight), var(--shadow-2); }
+    .card::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto 0;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--tone), transparent);
+      opacity: 0.85;
+      transition: opacity var(--dur-med) var(--ease-out);
+    }
+    .card[data-data-state="STALE"] { opacity: 0.82; }
+    .card[data-data-state="STALE"]::before { opacity: 0.5; }
+    .card[data-data-state="ERROR"] { border-style: dashed; }
+
+    .card__head { display: flex; align-items: flex-start; gap: 9px; min-width: 0; }
+    .card__icon { color: var(--tone); flex: none; transition: color var(--dur-med) var(--ease-out); }
+    .card__titles { min-width: 0; flex: 1 1 auto; }
+    .card__title {
+      margin: 0;
+      font-size: clamp(0.88rem, 2.6vw, 0.98rem);
+      font-weight: 650;
+      overflow-wrap: anywhere;
+    }
+    .card__source {
+      margin: 2px 0 0;
+      font-size: 0.68rem;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .badge {
+      flex: none;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid currentColor;
+      font-size: 0.62rem;
+      font-weight: 700;
+      letter-spacing: 0.07em;
+      color: var(--text-muted);
+      transition: color var(--dur-med) var(--ease-out);
+    }
+    .badge[data-data-state="FRESH"] { color: var(--state-fresh); }
+    .badge[data-data-state="STALE"] { color: var(--state-stale); }
+    .badge[data-data-state="ERROR"] { color: var(--state-error); }
+
+    .card__value {
+      margin: 0;
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      color: var(--tone);
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+    .card__number {
+      font-size: clamp(1.9rem, 10vw, 3.2rem);
+      font-weight: 700;
+      line-height: 1.05;
+      font-variant-numeric: tabular-nums;
+      transition: color var(--dur-med) var(--ease-out);
+    }
+    .card__unit { font-size: clamp(0.9rem, 2.8vw, 1.2rem); font-weight: 600; color: var(--text-muted); }
+
+    .card__foot {
+      margin: 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 3px 10px;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      overflow-wrap: anywhere;
+    }
+    .card__foot b { color: var(--text); font-weight: 600; }
+
+    /* -------------------------------------------------- mode: horizontal */
+    .hrows { display: flex; flex-direction: column; gap: clamp(10px, 1.8vw, 16px); min-width: 0; }
+    .hrow {
+      --tone: #8fa3bf;
+      padding: clamp(12px, 2vw, 18px);
+      border-radius: var(--radius-lg);
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      min-width: 0;
+    }
+    .hrow__head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; min-width: 0; }
+    .hrow__label { font-weight: 650; font-size: 0.92rem; min-width: 0; overflow-wrap: anywhere; }
+    .hrow__value {
+      margin-left: auto;
+      display: inline-flex;
+      align-items: baseline;
+      gap: 4px;
+      color: var(--tone);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .hrow__value b { font-size: clamp(1.05rem, 4vw, 1.35rem); }
+    .hrow__value i { font-style: normal; font-size: 0.8rem; color: var(--text-muted); }
+
+    .track {
+      position: relative;
+      height: 16px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.07);
+      border: 1px solid var(--line);
+      box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4);
+      overflow: hidden;
+      min-width: 0;
+    }
+    .track__fill {
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 0%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, rgba(143, 163, 191, 0.28), var(--tone));
+      background: linear-gradient(90deg, color-mix(in srgb, var(--tone) 30%, transparent), var(--tone));
+      transition: width var(--dur-slow) var(--ease-soft);
+    }
+    .track__knob {
+      position: absolute;
+      top: 50%;
+      left: 0%;
+      width: 12px; height: 12px;
+      margin: -6px 0 0 -6px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 0 0 2px var(--tone), 0 2px 6px rgba(0, 0, 0, 0.45);
+      transition: left var(--dur-slow) var(--ease-soft);
+    }
+    .track__tick {
+      position: absolute;
+      top: 0; bottom: 0;
+      width: 1px;
+      background: rgba(255, 255, 255, 0.16);
+    }
+    .track[data-nodata="true"] .track__fill,
+    .track[data-nodata="true"] .track__knob { display: none; }
+    .track[data-nodata="true"]::after {
+      content: "нет данных";
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.66rem;
+      letter-spacing: 0.08em;
+      color: var(--state-error);
+    }
+    .hrow__scale {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 0.68rem;
+      color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* -------------------------------------------------------- mode: bars */
+    .barchart {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: clamp(8px, 1.6vw, 16px);
+      min-width: 0;
+    }
+    .bcol {
+      --tone: #8fa3bf;
+      padding: clamp(9px, 1.6vw, 16px);
+      border-radius: var(--radius-lg);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-width: 0;
+      overflow: hidden;
+    }
+    .bcol__head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+    .bcol__head .card__title { font-size: clamp(0.7rem, 2.5vw, 0.86rem); }
+    .bcol__head .card__icon .icon { width: 18px; height: 18px; }
+    .bcol__plot {
+      display: flex;
+      gap: 5px;
+      height: clamp(110px, 26vw, 190px);
+      min-width: 0;
+    }
+    .bcol__axis {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      font-size: clamp(0.5rem, 2vw, 0.66rem);
+      color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+      white-space: nowrap;
+    }
+    .bcol__track {
+      position: relative;
+      flex: 1 1 auto;
+      min-width: 0;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--line);
+      background:
+        repeating-linear-gradient(to top, rgba(255, 255, 255, 0.09) 0 1px, transparent 1px 25%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.01));
+      display: flex;
+      align-items: flex-end;
+      overflow: hidden;
+    }
+    .bcol__bar {
+      width: 100%;
+      height: 0%;
+      border-radius: var(--radius-sm) var(--radius-sm) 2px 2px;
+      background: linear-gradient(180deg, var(--tone), rgba(143, 163, 191, 0.28));
+      background: linear-gradient(180deg, var(--tone), color-mix(in srgb, var(--tone) 35%, transparent));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25);
+      transition: height var(--dur-slow) var(--ease-soft);
+    }
+    .bcol__track[data-nodata="true"] .bcol__bar { display: none; }
+    .bcol__track[data-nodata="true"]::after {
+      content: "—";
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.4rem;
+      color: var(--state-error);
+    }
+    .bcol__value {
+      display: flex;
+      align-items: baseline;
+      gap: 4px;
+      color: var(--tone);
+      font-variant-numeric: tabular-nums;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+    .bcol__value b { font-size: clamp(0.9rem, 3.4vw, 1.25rem); }
+    .bcol__value i { font-style: normal; font-size: 0.7rem; color: var(--text-muted); }
+    .bcol__range { font-size: 0.6rem; color: var(--text-muted); overflow-wrap: anywhere; }
+
+    /* ------------------------------------------------------ mode: gauges */
+    .gauges {
+      display: grid;
+      gap: clamp(10px, 1.8vw, 18px);
+      grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
+      min-width: 0;
+    }
+    .gauge { align-items: center; text-align: center; }
+    .gauge__svg { width: 100%; max-width: 210px; height: auto; display: block; margin: 0 auto; }
+    .gauge__track {
+      fill: none;
+      stroke: rgba(255, 255, 255, 0.12);
+      stroke-width: 10;
+      stroke-linecap: round;
+    }
+    .gauge__progress {
+      fill: none;
+      stroke: var(--tone);
+      stroke-width: 10;
+      stroke-linecap: round;
+      transition: stroke-dasharray var(--dur-slow) var(--ease-soft), stroke var(--dur-med) var(--ease-out);
+    }
+    .gauge[data-nodata="true"] .gauge__progress { display: none; }
+    .gauge__icon { color: var(--tone); }
+    .gauge__value {
+      fill: var(--tone);
+      font-size: 26px;
+      font-weight: 700;
+      text-anchor: middle;
+      font-variant-numeric: tabular-nums;
+      transition: fill var(--dur-med) var(--ease-out);
+    }
+    .gauge__unit { fill: var(--text-muted); font-size: 11px; text-anchor: middle; font-weight: 600; }
+    .gauge[data-nodata="true"] .gauge__value { fill: var(--state-error); }
+    .gauge__meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      justify-content: center;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+    .gauge__scale { font-size: 0.68rem; color: var(--text-muted); margin: 0; overflow-wrap: anywhere; }
+
+    /* ---------------------------------------------------- mode: history */
+    .history {
+      --tone: #8fa3bf;
+      padding: clamp(12px, 2vw, 20px);
+      border-radius: var(--radius-lg);
+      display: flex;
+      flex-direction: column;
+      gap: clamp(10px, 1.6vw, 16px);
+      min-width: 0;
+    }
+    .history__head {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 14px;
+      align-items: flex-end;
+      justify-content: space-between;
+      min-width: 0;
+    }
+    .history__title h2 {
+      margin: 0;
+      font-size: clamp(0.95rem, 2.6vw, 1.1rem);
+      font-weight: 650;
+    }
+    .history__sub {
+      margin: 2px 0 0;
+      font-size: 0.76rem;
+      color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .history__actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+    }
+    .history__select {
+      appearance: none;
+      -webkit-appearance: none;
+      padding: 9px 30px 9px 12px;
+      min-height: 38px;
+      border-radius: 999px;
+      border: 1px solid var(--line-strong);
+      background:
+        linear-gradient(180deg, var(--glass-3), rgba(255, 255, 255, 0.05)),
+        linear-gradient(45deg, transparent 50%, var(--text-muted) 50%) calc(100% - 16px) 50% / 6px 6px no-repeat,
+        linear-gradient(135deg, var(--text-muted) 50%, transparent 50%) calc(100% - 11px) 50% / 6px 6px no-repeat;
+      color: var(--text);
+      font: inherit;
+      font-size: 0.84rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: box-shadow var(--dur-med) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+    }
+    .history__select:hover { box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28), var(--highlight); transform: translateY(-1px); }
+    .history__select:active { transform: translateY(0) scale(0.99); }
+    .history__select:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+    .history__select option { background: #101a2c; color: var(--text); }
+
+    .btn {
+      min-height: 38px;
+      padding: 9px 14px;
+      border-radius: 999px;
+      border: 1px solid var(--line-strong);
+      background: linear-gradient(180deg, var(--glass-2), rgba(255, 255, 255, 0.04));
+      color: var(--text);
+      font: inherit;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background var(--dur-med) var(--ease-out), transform var(--dur-fast) var(--ease-out),
+                  box-shadow var(--dur-med) var(--ease-out), color var(--dur-med) var(--ease-out);
+    }
+    .btn:hover { background: linear-gradient(180deg, var(--glass-3), rgba(255, 255, 255, 0.06)); box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28); transform: translateY(-1px); }
+    .btn:active { transform: translateY(0) scale(0.97); transition-duration: 80ms; }
+    .btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+    .btn[data-armed="true"] {
+      color: var(--state-error);
+      border-color: currentColor;
+      box-shadow: 0 0 0 1px rgba(255, 107, 94, 0.25), 0 8px 22px rgba(255, 107, 94, 0.18);
+    }
+
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+    .chip {
+      min-height: 34px;
+      padding: 7px 11px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text-muted);
+      font: inherit;
+      font-size: 0.76rem;
+      font-weight: 600;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      transition: background var(--dur-med) var(--ease-out), color var(--dur-med) var(--ease-out),
+                  transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-med) var(--ease-out);
+    }
+    .chip:hover { color: var(--text); background: rgba(255, 255, 255, 0.08); transform: translateY(-1px); }
+    .chip:active { transform: translateY(0) scale(0.96); transition-duration: 80ms; }
+    .chip[aria-pressed="true"] {
+      color: var(--text);
+      background: linear-gradient(180deg, var(--glass-3), rgba(255, 255, 255, 0.05));
+      border-color: var(--line-strong);
+      box-shadow: var(--highlight), 0 6px 16px rgba(0, 0, 0, 0.26);
+    }
+    .chip:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+    .history__hint {
+      margin: 0;
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      overflow-wrap: anywhere;
+    }
+
+    .chart {
+      position: relative;
+      min-width: 0;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01));
+      padding: 6px;
+      touch-action: pan-y;
+    }
+    .chart:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+    .chart__svg { display: block; width: 100%; height: auto; overflow: visible; }
+    .chart__lane-frame { fill: none; stroke: rgba(255, 255, 255, 0.10); stroke-width: 1; }
+    .chart__grid { stroke: rgba(255, 255, 255, 0.09); stroke-width: 1; }
+    .chart__grid--v { stroke-dasharray: 2 4; }
+    .chart__ylist { font-size: 10px; fill: var(--text-muted); font-variant-numeric: tabular-nums; }
+    .chart__xlist { font-size: 10px; fill: var(--text-muted); font-variant-numeric: tabular-nums; }
+    .chart__lane-label { font-size: 11px; fill: var(--text); font-weight: 600; }
+    .chart__line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+    .chart__line[data-metric="temperature"] { stroke: var(--metric-temperature); }
+    .chart__line[data-metric="humidity"] { stroke: var(--metric-humidity); }
+    .chart__line[data-metric="pressure"] { stroke: var(--metric-pressure); }
+    /* State never replaces the metric colour: it only adds opacity/dash. */
+    .chart__line[data-state="STALE"] { opacity: 0.62; stroke-dasharray: 5 4; }
+    .chart__line[data-state="ERROR"] { opacity: 0.42; stroke-dasharray: 2 5; }
+    .chart__line { transition: opacity var(--dur-med) var(--ease-out); }
+    .chart__dot { stroke: none; }
+    .chart__dot[data-state="STALE"] { fill: var(--state-stale); }
+    .chart__dot[data-state="ERROR"] { fill: var(--state-error); }
+    .chart__current { transition: cx var(--dur-slow) var(--ease-soft), cy var(--dur-slow) var(--ease-soft); }
+    .chart__cursor { stroke: rgba(255, 255, 255, 0.5); stroke-width: 1; stroke-dasharray: 3 3; }
+    .chart__cursor-dot { fill: #fff; stroke-width: 2; }
+    .chart__empty {
+      margin: 0;
+      padding: clamp(18px, 6vw, 42px) 14px;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+    .chart__empty b { color: var(--text); font-size: 1rem; }
+    .chart__empty span { font-size: 0.76rem; }
+
+    .chart__tooltip {
+      position: absolute;
+      z-index: 3;
+      min-width: 148px;
+      padding: 9px 11px;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--line-strong);
+      background: rgba(14, 22, 36, 0.86);
+      backdrop-filter: blur(10px) saturate(140%);
+      -webkit-backdrop-filter: blur(10px) saturate(140%);
+      box-shadow: var(--highlight), var(--shadow-2);
+      font-size: 0.76rem;
+      pointer-events: none;
+      transition: opacity var(--dur-fast) linear;
+    }
+    .chart__tooltip[hidden] { display: none; }
+    .chart__tooltip b { font-variant-numeric: tabular-nums; }
+    .tt__time { color: var(--text-muted); margin-bottom: 5px; font-variant-numeric: tabular-nums; }
+    .tt__row { display: flex; align-items: center; gap: 7px; }
+    .tt__row + .tt__row { margin-top: 3px; }
+    .tt__row .icon { width: 14px; height: 14px; }
+    .tt__row[data-metric="temperature"] { color: var(--metric-temperature); }
+    .tt__row[data-metric="humidity"] { color: var(--metric-humidity); }
+    .tt__row[data-metric="pressure"] { color: var(--metric-pressure); }
+    .tt__value { font-weight: 700; font-variant-numeric: tabular-nums; }
+    .tt__unit { color: var(--text-muted); font-size: 0.7rem; }
+    .tt__state { margin-left: auto; font-size: 0.62rem; letter-spacing: 0.05em; }
+    .tt__state[data-data-state="FRESH"] { color: var(--state-fresh); }
+    .tt__state[data-data-state="STALE"] { color: var(--state-stale); }
+    .tt__state[data-data-state="ERROR"] { color: var(--state-error); }
+
+    .history__table { margin: 0; }
+    .history__table table { border-collapse: collapse; width: 100%; }
+    .history__table th, .history__table td { text-align: left; padding: 2px 6px; }
+
+    /* ------------------------------------------------------------ footer */
+    .app__footer {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px 16px;
+      font-size: 0.76rem;
+      color: var(--text-muted);
+    }
+    .app__footer b { color: var(--text); font-weight: 600; }
+    .note { margin: 0; font-size: 0.74rem; color: var(--text-muted); overflow-wrap: anywhere; }
+
+    @media (max-width: 380px) {
+      .card__number { font-size: 1.9rem; }
+      .connection { width: 100%; justify-content: center; }
+      .bcol { padding: 8px; }
+      .history__actions { width: 100%; }
+      .history__select, .btn { flex: 1 1 auto; }
+    }
+
+    /* ------------------------------------------------------------------
+       THE role -> appearance mapping. JavaScript only ever sets
+       data-tone="<role id>"; every colour decision lives here.
+       ------------------------------------------------------------------ */
+    [data-tone="temp-cold"] { --tone: var(--role-temp-cold); }
+    [data-tone="temp-comfort"] { --tone: var(--role-temp-comfort); }
+    [data-tone="temp-hot"] { --tone: var(--role-temp-hot); }
+    [data-tone="humidity-low"] { --tone: var(--role-humidity-low); }
+    [data-tone="humidity-comfort"] { --tone: var(--role-humidity-comfort); }
+    [data-tone="humidity-high"] { --tone: var(--role-humidity-high); }
+    [data-tone="pressure-low"] { --tone: var(--role-pressure-low); }
+    [data-tone="pressure-normal"] { --tone: var(--role-pressure-normal); }
+    [data-tone="pressure-high"] { --tone: var(--role-pressure-high); }
+
+    /* Motion preferences: no animations, no tweens, no long transitions. */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+        scroll-behavior: auto !important;
+      }
+      .tabs__indicator { transition: none !important; }
+      .card:hover { transform: none; }
+      .tab:hover, .chip:hover, .btn:hover { transform: none; }
+    }
+  </style>
+</head>
+<body>
+  <!-- Inline SVG sprite: local icons only, no webfont, no CDN, no images. -->
+  <svg class="sprite" aria-hidden="true" focusable="false"><defs>
+    <symbol id="i-temp" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round">
+      <path d="M10 13.6V5a2 2 0 1 1 4 0v8.6a4.2 4.2 0 1 1-4 0z"/>
+      <path d="M12 9.5v6.2"/>
+    </symbol>
+    <symbol id="i-humidity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3.4c3.1 3.5 5.6 6.3 5.6 9.3a5.6 5.6 0 1 1-11.2 0c0-3 2.5-5.8 5.6-9.3z"/>
+    </symbol>
+    <symbol id="i-pressure" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4.2 17.4a8.4 8.4 0 1 1 15.6 0"/>
+      <path d="M12 17.4l4.1-5.2"/>
+      <circle cx="12" cy="17.4" r="1.2" fill="currentColor" stroke="none"/>
+    </symbol>
+    <symbol id="i-network" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3.5 9.2a13.5 13.5 0 0 1 17 0"/>
+      <path d="M6.6 12.6a9 9 0 0 1 10.8 0"/>
+      <path d="M9.6 15.9a4.4 4.4 0 0 1 4.8 0"/>
+      <circle cx="12" cy="19" r="1.2" fill="currentColor" stroke="none"/>
+    </symbol>
+  </defs></svg>
+
+  <main class="app">
+    <header class="app__header">
+      <div class="brand">
+        <span class="brand__icon" aria-hidden="true">
+          <svg class="icon" width="26" height="26"><use href="#i-network"/></svg>
+        </span>
+        <h1>ESP32 Weather Station</h1>
+      </div>
+      <div class="connection glass" id="connection" data-state="OFFLINE" role="status" aria-live="polite">
+        <span class="connection__dot" aria-hidden="true"></span>
+        <span class="connection__label" id="connection-label">OFFLINE</span>
+        <span class="connection__meta" id="connection-meta">обновление: —</span>
+      </div>
+    </header>
+
+    <!-- Five presentation modes of ONE dashboard (no separate pages). -->
+    <nav class="tabs glass" role="tablist" aria-label="Режим отображения" id="tabs">
+      <span class="tabs__indicator" id="tabs-indicator" aria-hidden="true"></span>
+      <button class="tab" type="button" role="tab" id="tab-numeric" aria-controls="panel-numeric"
+              aria-selected="true" tabindex="0" data-mode="numeric">Цифры</button>
+      <button class="tab" type="button" role="tab" id="tab-horizontal" aria-controls="panel-horizontal"
+              aria-selected="false" tabindex="-1" data-mode="horizontal">Горизонтальные</button>
+      <button class="tab" type="button" role="tab" id="tab-bars" aria-controls="panel-bars"
+              aria-selected="false" tabindex="-1" data-mode="bars">Столбцы</button>
+      <button class="tab" type="button" role="tab" id="tab-gauges" aria-controls="panel-gauges"
+              aria-selected="false" tabindex="-1" data-mode="gauges">Шкалы</button>
+      <button class="tab" type="button" role="tab" id="tab-history" aria-controls="panel-history"
+              aria-selected="false" tabindex="-1" data-mode="history">История</button>
+    </nav>
+
+    <!-- Panels are filled once by buildPanels(); polling only updates values. -->
+    <section class="panels" id="panels">
+      <div class="panel" role="tabpanel" id="panel-numeric" aria-labelledby="tab-numeric" data-mode="numeric"></div>
+      <div class="panel" role="tabpanel" id="panel-horizontal" aria-labelledby="tab-horizontal" data-mode="horizontal" hidden></div>
+      <div class="panel" role="tabpanel" id="panel-bars" aria-labelledby="tab-bars" data-mode="bars" hidden></div>
+      <div class="panel" role="tabpanel" id="panel-gauges" aria-labelledby="tab-gauges" data-mode="gauges" hidden></div>
+      <div class="panel" role="tabpanel" id="panel-history" aria-labelledby="tab-history" data-mode="history" hidden></div>
+    </section>
+
+    <footer class="app__footer">
+      <span>uptime ESP32: <b id="uptime">—</b></span>
+      <span>опрос UI: <b id="poll-interval">—</b></span>
+      <span>источник: <b>GET /api/weather</b></span>
+      <span>история: <b>в памяти вкладки</b></span>
+    </footer>
+
+    <p class="note">
+      Один dashboard, пять режимов. Переключение вкладок не выполняет запросов: рендерер получает тот же
+      uiModel, что и polling. История собирается на клиенте из ответов /api/weather и живёт только в памяти
+      этой страницы. LVGL/ILI9341 — отдельная итерация.
+    </p>
+  </main>
+
+  <script>
+    'use strict';
+
+    /* =====================================================================
+       Layer 1 — configuration. All thresholds, ranges, intervals and history
+       parameters live here; renderers contain no magic numbers.
+       ===================================================================== */
+    const APP_CONFIG = {
+      apiPath: '/api/weather',
+      pollIntervalMs: 1500,
+      pollIntervalHiddenMs: 5000,
+      requestTimeoutMs: 3500,
+      freshnessMaxAgeMs: { temperature: 15000, humidity: 7500, pressure: 15000 },
+      uiTickMs: 1000
+    };
+
+    const SEMANTIC_THRESHOLDS = {
+      temperature: { coldBelowC: 18, hotAboveC: 26 },
+      humidity: { lowBelowPct: 30, highAbovePct: 60 },
+      pressure: { lowBelowHpa: 1000, highAboveHpa: 1020 }
+    };
+
+    const METRIC_CONFIG = {
+      temperature: {
+        key: 'temperature', label: 'Температура', unit: '°C', source: 'BMP280', icon: 'i-temp',
+        range: { min: -10, max: 40 }, ticks: [-10, 0, 10, 20, 30, 40], decimals: 1
+      },
+      humidity: {
+        key: 'humidity', label: 'Влажность', unit: '%', source: 'DHT11', icon: 'i-humidity',
+        range: { min: 0, max: 100 }, ticks: [0, 25, 50, 75, 100], decimals: 0
+      },
+      pressure: {
+        key: 'pressure', label: 'Давление', unit: 'hPa', source: 'BMP280', icon: 'i-pressure',
+        range: { min: 950, max: 1050 }, ticks: [950, 975, 1000, 1025, 1050], decimals: 1
+      }
+    };
+
+    // ---------------------------------------------------------- history cfg
+    // Client-side session history. Sampling is adaptive: short retentions keep
+    // almost every poll, long ones keep a downsampled trail. maxPoints bounds the
+    // ring buffer; hardMaxPoints is the absolute ceiling for any preset.
+    const HISTORY_CONFIG = {
+      defaultPresetId: '5m',
+      hardMaxPoints: 320,
+      maxRenderPoints: 180,
+      minRetentionMs: 10 * 1000,
+      maxRetentionMs: 24 * 60 * 60 * 1000,
+      // A gap larger than gapFactor x sampleMs breaks the line (no fake continuity).
+      gapFactor: 3,
+      secondsInAxisBelowMs: 5 * 60 * 1000,
+      axisTicks: 5,
+      numberTweenMs: 220,
+      presets: [
+        { id: '10s', label: '10 с', retentionMs: 10 * 1000, sampleMs: 1000, maxPoints: 14 },
+        { id: '30s', label: '30 с', retentionMs: 30 * 1000, sampleMs: 1000, maxPoints: 34 },
+        { id: '1m', label: '1 мин', retentionMs: 60 * 1000, sampleMs: 2000, maxPoints: 34 },
+        { id: '5m', label: '5 мин', retentionMs: 300 * 1000, sampleMs: 5000, maxPoints: 64 },
+        { id: '15m', label: '15 мин', retentionMs: 900 * 1000, sampleMs: 10000, maxPoints: 94 },
+        { id: '30m', label: '30 мин', retentionMs: 1800 * 1000, sampleMs: 15000, maxPoints: 124 },
+        { id: '1h', label: '1 ч', retentionMs: 3600 * 1000, sampleMs: 30000, maxPoints: 124 },
+        { id: '3h', label: '3 ч', retentionMs: 3 * 3600 * 1000, sampleMs: 60000, maxPoints: 184 },
+        { id: '6h', label: '6 ч', retentionMs: 6 * 3600 * 1000, sampleMs: 120000, maxPoints: 184 },
+        { id: '12h', label: '12 ч', retentionMs: 12 * 3600 * 1000, sampleMs: 300000, maxPoints: 148 },
+        { id: '24h', label: '24 ч', retentionMs: 24 * 3600 * 1000, sampleMs: 300000, maxPoints: 292 }
+      ],
+      // Per-metric Y scale. Never one shared 0..max scale: pressure would then
+      // look like it swings wildly. minSpan prevents false drama on tiny changes.
+      yRanges: {
+        temperature: { mode: 'dynamic', minSpan: 4, paddingRatio: 0.12, absoluteMin: -25, absoluteMax: 55 },
+        humidity: { mode: 'fixed', min: 0, max: 100 },
+        pressure: { mode: 'dynamic', minSpan: 4, paddingRatio: 0.12, absoluteMin: 900, absoluteMax: 1100 }
+      }
+    };
+
+    const METRIC_KEYS = ['temperature', 'humidity', 'pressure'];
+    const MODES = ['numeric', 'horizontal', 'bars', 'gauges', 'history'];
+    const DEFAULT_MODE = 'numeric';
+
+    const DATA_STATES = { FRESH: 'FRESH', STALE: 'STALE', ERROR: 'ERROR' };
+    const CONNECTION_STATES = { ONLINE: 'ONLINE', OFFLINE: 'OFFLINE' };
+    const STATE_CODES = { FRESH: 0, STALE: 1, ERROR: 2 };
+    const STATE_BY_CODE = ['FRESH', 'STALE', 'ERROR'];
+
+    const COLOR_ROLES = {
+      tempCold: 'temp-cold',
+      tempComfort: 'temp-comfort',
+      tempHot: 'temp-hot',
+      humidityLow: 'humidity-low',
+      humidityComfort: 'humidity-comfort',
+      humidityHigh: 'humidity-high',
+      pressureLow: 'pressure-low',
+      pressureNormal: 'pressure-normal',
+      pressureHigh: 'pressure-high'
+    };
+
+    const GAUGE_GEOMETRY = { radius: 52, cx: 60, cy: 60, sweepFraction: 0.75 };
+    const HISTORY_CHART = { laneHeights: { small: 84, medium: 96, large: 108 }, poolDots: 12 };
+
+    /* =====================================================================
+       Layer 2 — UI state (single source of truth) + bounded history ring.
+       ===================================================================== */
+    const uiState = {
+      connection: CONNECTION_STATES.OFFLINE,
+      weather: null,
+      uiModel: null,
+      activeMode: DEFAULT_MODE,
+      lastSuccessAt: null,
+      lastErrorAt: null,
+      lastErrorMessage: '',
+      pollCount: 0,
+      errorCount: 0,
+      inFlight: false,
+      timerId: null,
+      tickerId: null,
+      historyPresetId: HISTORY_CONFIG.defaultPresetId,
+      hoverIndex: -1,
+      clearArmed: false
+    };
+
+    // Ring buffer of samples in parallel typed arrays: no per-sample objects, no
+    // unbounded growth, no GC churn. One sample = one column.
+    const history = {
+      capacity: 0,
+      count: 0,
+      start: 0,
+      time: null,
+      temperature: null,
+      humidity: null,
+      pressure: null,
+      temperatureState: null,
+      humidityState: null,
+      pressureState: null,
+      lastSampleAt: 0,
+      totalSamples: 0
+    };
+
+    const dom = { tabs: [], panelsByMode: {}, panelRoots: {}, refs: {} };
+
+    /* =====================================================================
+       Layer 3 — API access. Only GET /api/weather; no HTML generation here.
+       ===================================================================== */
+    async function fetchWeather(options) {
+      const settings = options || {};
+      const timeoutMs = settings.timeoutMs || APP_CONFIG.requestTimeoutMs;
+      const supportsAbort = typeof AbortController === 'function';
+      const controller = supportsAbort ? new AbortController() : null;
+      const timer = controller ? setTimeout(function () { controller.abort(); }, timeoutMs) : null;
+
+      try {
+        const response = await fetch(APP_CONFIG.apiPath, {
+          method: 'GET',
+          cache: 'no-store',
+          headers: { Accept: 'application/json' },
+          signal: controller ? controller.signal : undefined
+        });
+
+        if (!response || !response.ok) {
+          throw new Error('HTTP ' + (response ? response.status : '?'));
+        }
+
+        try {
+          return await response.json();
+        } catch (parseError) {
+          throw new Error('invalid JSON (' + (parseError && parseError.message ? parseError.message : 'parse error') + ')');
+        }
+      } finally {
+        if (timer !== null) { clearTimeout(timer); }
+      }
+    }
+
+    function asFiniteNumber(value) {
+      return (typeof value === 'number' && isFinite(value)) ? value : null;
+    }
+
+    function asNonNegativeNumber(value) {
+      const number = asFiniteNumber(value);
+      return (number === null || number < 0) ? null : number;
+    }
+
+    function normalizeWeather(raw) {
+      if (!raw || typeof raw !== 'object') {
+        throw new Error('payload is not a JSON object');
+      }
+
+      const bmpValid = raw.bmp280_valid === true;
+      const dhtValid = raw.dht11_valid === true;
+      const pressurePa = asFiniteNumber(raw.pressure_pa);
+      const pressureHpa = asFiniteNumber(raw.pressure_hpa);
+
+      return {
+        temperature: {
+          value: asFiniteNumber(raw.temperature_c),   // BMP280 only
+          valid: bmpValid,
+          ageMs: asNonNegativeNumber(raw.bmp280_age_ms),
+          source: 'BMP280'
+        },
+        humidity: {
+          value: asFiniteNumber(raw.humidity_pct),    // DHT11 only
+          valid: dhtValid,
+          ageMs: asNonNegativeNumber(raw.dht11_age_ms),
+          source: 'DHT11'
+        },
+        pressure: {
+          value: pressureHpa !== null ? pressureHpa : (pressurePa !== null ? pressurePa / 100 : null),
+          valuePa: pressurePa,
+          valid: bmpValid,
+          ageMs: asNonNegativeNumber(raw.bmp280_age_ms),
+          source: 'BMP280'
+        },
+        uptimeMs: asNonNegativeNumber(raw.uptime_ms)
+      };
+    }
+
+    /* =====================================================================
+       Layer 4 — semantic layer: pure functions, no DOM, no CSS.
+       ===================================================================== */
+    function classifyDataState(reading, maxAgeMs, context) {
+      const offline = !!(context && context.offline);
+      if (!reading || reading.value === null || !isFinite(reading.value)) {
+        return DATA_STATES.ERROR;
+      }
+      if (!reading.valid) {
+        return DATA_STATES.STALE;
+      }
+      if (maxAgeMs !== null && maxAgeMs !== undefined &&
+          reading.ageMs !== null && reading.ageMs > maxAgeMs) {
+        return DATA_STATES.STALE;
+      }
+      if (offline) {
+        return DATA_STATES.STALE;
+      }
+      return DATA_STATES.FRESH;
+    }
+
+    function getTemperatureState(reading, context) {
+      const value = (reading && reading.value !== null) ? reading.value : null;
+      let colorRole = null;
+      if (value !== null) {
+        const limits = SEMANTIC_THRESHOLDS.temperature;
+        colorRole = value < limits.coldBelowC ? COLOR_ROLES.tempCold
+          : value > limits.hotAboveC ? COLOR_ROLES.tempHot
+            : COLOR_ROLES.tempComfort;
+      }
+      return {
+        metric: 'temperature', label: 'Температура', source: 'BMP280', unit: '°C',
+        value: value,
+        ageMs: reading ? reading.ageMs : null,
+        valid: !!(reading && reading.valid),
+        dataState: classifyDataState(reading, APP_CONFIG.freshnessMaxAgeMs.temperature, context),
+        colorRole: colorRole
+      };
+    }
+
+    function getHumidityState(reading, context) {
+      const value = (reading && reading.value !== null) ? reading.value : null;
+      let colorRole = null;
+      if (value !== null) {
+        const limits = SEMANTIC_THRESHOLDS.humidity;
+        colorRole = value < limits.lowBelowPct ? COLOR_ROLES.humidityLow
+          : value > limits.highAbovePct ? COLOR_ROLES.humidityHigh
+            : COLOR_ROLES.humidityComfort;
+      }
+      return {
+        metric: 'humidity', label: 'Влажность', source: 'DHT11', unit: '%',
+        value: value,
+        ageMs: reading ? reading.ageMs : null,
+        valid: !!(reading && reading.valid),
+        dataState: classifyDataState(reading, APP_CONFIG.freshnessMaxAgeMs.humidity, context),
+        colorRole: colorRole
+      };
+    }
+
+    function getPressureState(reading, context) {
+      const value = (reading && reading.value !== null) ? reading.value : null;
+      let colorRole = null;
+      if (value !== null) {
+        const limits = SEMANTIC_THRESHOLDS.pressure;
+        colorRole = value < limits.lowBelowHpa ? COLOR_ROLES.pressureLow
+          : value > limits.highAboveHpa ? COLOR_ROLES.pressureHigh
+            : COLOR_ROLES.pressureNormal;
+      }
+      return {
+        metric: 'pressure', label: 'Давление', source: 'BMP280', unit: 'hPa',
+        value: value,
+        valuePa: (reading && reading.valuePa !== null && reading.valuePa !== undefined) ? reading.valuePa : null,
+        ageMs: reading ? reading.ageMs : null,
+        valid: !!(reading && reading.valid),
+        dataState: classifyDataState(reading, APP_CONFIG.freshnessMaxAgeMs.pressure, context),
+        colorRole: colorRole
+      };
+    }
+
+    function getMetricState(metricKey, reading, context) {
+      if (metricKey === 'temperature') { return getTemperatureState(reading, context); }
+      if (metricKey === 'humidity') { return getHumidityState(reading, context); }
+      return getPressureState(reading, context);
+    }
+
+    /* =====================================================================
+       Layer 5 — UI model: the only thing renderers consume.
+       ===================================================================== */
+    function normalizeToRange(value, range) {
+      if (value === null || value === undefined || !isFinite(value)) { return null; }
+      if (!range || range.max <= range.min) { return null; }
+      const fraction = (value - range.min) / (range.max - range.min);
+      return Math.min(1, Math.max(0, fraction));
+    }
+
+    function formatAge(ageMs) {
+      if (ageMs === null || ageMs === undefined || !isFinite(ageMs)) { return 'нет данных'; }
+      if (ageMs < 1000) { return Math.round(ageMs) + ' мс'; }
+      if (ageMs < 60000) { return (ageMs / 1000).toFixed(1) + ' с'; }
+      const minutes = Math.floor(ageMs / 60000);
+      const seconds = Math.round((ageMs % 60000) / 1000);
+      return minutes + ' мин ' + seconds + ' с';
+    }
+
+    function formatMetricValue(state) {
+      if (state.value === null || !isFinite(state.value)) { return '—'; }
+      const config = METRIC_CONFIG[state.metric];
+      const decimals = config ? config.decimals : 1;
+      return state.value.toFixed(decimals);
+    }
+
+    function formatDuration(ms) {
+      if (ms === null || !isFinite(ms)) { return '—'; }
+      const totalSeconds = Math.floor(ms / 1000);
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      if (hours > 0) { return hours + ' ч ' + minutes + ' мин ' + seconds + ' с'; }
+      if (minutes > 0) { return minutes + ' мин ' + seconds + ' с'; }
+      return seconds + ' с';
+    }
+
+    function formatDurationShort(ms) {
+      if (ms < 60 * 1000) { return Math.round(ms / 1000) + ' с'; }
+      if (ms < 3600 * 1000) { return Math.round(ms / 60000) + ' мин'; }
+      return Math.round(ms / 3600000) + ' ч';
+    }
+
+    function formatClock(timestampMs, withSeconds) {
+      const date = new Date(timestampMs);
+      const pad = function (value) { return (value < 10 ? '0' : '') + value; };
+      const base = pad(date.getHours()) + ':' + pad(date.getMinutes());
+      return withSeconds ? base + ':' + pad(date.getSeconds()) : base;
+    }
+
+    function worstDataState(metrics) {
+      const order = [DATA_STATES.FRESH, DATA_STATES.STALE, DATA_STATES.ERROR];
+      let worst = DATA_STATES.FRESH;
+      metrics.forEach(function (metric) {
+        if (order.indexOf(metric.dataState) > order.indexOf(worst)) { worst = metric.dataState; }
+      });
+      return worst;
+    }
+
+    function buildUiModel() {
+      const normalized = uiState.weather;
+      const offline = uiState.connection === CONNECTION_STATES.OFFLINE;
+      const elapsedSinceSuccess = (offline && uiState.lastSuccessAt !== null)
+        ? (Date.now() - uiState.lastSuccessAt) : 0;
+      const context = { offline: offline };
+
+      const metrics = METRIC_KEYS.map(function (key) {
+        const config = METRIC_CONFIG[key];
+        const reading = normalized ? normalized[key] : null;
+        const adjusted = reading ? {
+          value: reading.value,
+          valid: reading.valid,
+          valuePa: reading.valuePa,
+          ageMs: reading.ageMs === null ? null : reading.ageMs + elapsedSinceSuccess
+        } : null;
+
+        const state = getMetricState(key, adjusted, context);
+        const fraction = normalizeToRange(state.value, config.range);
+
+        return {
+          key: key,
+          label: config.label,
+          unit: config.unit,
+          source: config.source,
+          icon: config.icon,
+          range: config.range,
+          ticks: config.ticks,
+          decimals: config.decimals,
+          value: state.value,
+          display: formatMetricValue(state),
+          fraction: fraction,
+          hasData: fraction !== null,
+          dataState: state.dataState,
+          colorRole: state.colorRole,
+          valid: state.valid,
+          ageMs: state.ageMs,
+          ageEstimated: !!state.ageEstimated,
+          ageText: (state.ageEstimated ? '~' : '') + formatAge(state.ageMs),
+          rangeText: config.range.min + '…' + config.range.max + ' ' + config.unit
+        };
+      });
+
+      const byKey = {};
+      metrics.forEach(function (metric) { byKey[metric.key] = metric; });
+
+      return {
+        metrics: metrics,
+        byKey: byKey,
+        uptimeMs: normalized ? normalized.uptimeMs : null,
+        connection: uiState.connection,
+        lastSuccessAt: uiState.lastSuccessAt,
+        activeMode: uiState.activeMode,
+        worstState: worstDataState(metrics)
+      };
+    }
+
+    /* =====================================================================
+       Layer 6 — history: collection, retention, trimming, sampling, series.
+       Client-side only: history never leaves the page and is never persisted.
+       ===================================================================== */
+    function historyPreset(presetId) {
+      for (let i = 0; i < HISTORY_CONFIG.presets.length; i += 1) {
+        if (HISTORY_CONFIG.presets[i].id === presetId) { return HISTORY_CONFIG.presets[i]; }
+      }
+      for (let i = 0; i < HISTORY_CONFIG.presets.length; i += 1) {
+        if (HISTORY_CONFIG.presets[i].id === HISTORY_CONFIG.defaultPresetId) {
+          return HISTORY_CONFIG.presets[i];
+        }
+      }
+      return HISTORY_CONFIG.presets[0];
+    }
+
+    function activeHistoryPreset() { return historyPreset(uiState.historyPresetId); }
+
+    function allocateHistory(capacity) {
+      history.capacity = capacity;
+      history.start = 0;
+      history.count = 0;
+      history.time = new Float64Array(capacity);
+      history.temperature = new Float32Array(capacity);
+      history.humidity = new Float32Array(capacity);
+      history.pressure = new Float32Array(capacity);
+      history.temperatureState = new Uint8Array(capacity);
+      history.humidityState = new Uint8Array(capacity);
+      history.pressureState = new Uint8Array(capacity);
+    }
+
+    // Switching retention keeps the same single store: the ring is re-sized and
+    // old samples are re-thinned into it instead of being duplicated.
+    function historyConfigure(presetId, nowMs) {
+      const preset = historyPreset(presetId);
+      const now = (typeof nowMs === 'number') ? nowMs : Date.now();
+      const capacity = Math.min(HISTORY_CONFIG.hardMaxPoints, Math.max(2, preset.maxPoints));
+
+      const carried = [];
+      const windowStart = now - preset.retentionMs;
+      for (let i = 0; i < history.count; i += 1) {
+        const index = (history.start + i) % history.capacity;
+        const stamp = history.time[index];
+        if (stamp >= windowStart) {
+          carried.push({
+            time: stamp,
+            temperature: history.temperature[index],
+            humidity: history.humidity[index],
+            pressure: history.pressure[index],
+            temperatureState: history.temperatureState[index],
+            humidityState: history.humidityState[index],
+            pressureState: history.pressureState[index]
+          });
+        }
+      }
+
+      uiState.historyPresetId = preset.id;
+      allocateHistory(capacity);
+
+      // Re-thin to the new sampling interval so a longer preset cannot keep a
+      // denser trail than its own sampleMs allows.
+      let lastKept = -Infinity;
+      for (let i = 0; i < carried.length; i += 1) {
+        const sample = carried[i];
+        if (sample.time - lastKept < preset.sampleMs && i < carried.length - 1) { continue; }
+        historyPush(sample);
+        lastKept = sample.time;
+      }
+      history.lastSampleAt = history.count > 0 ? history.time[(history.start + history.count - 1) % capacity] : 0;
+      return preset;
+    }
+
+    function historyPush(sample) {
+      if (history.capacity === 0) { return; }
+      if (history.count === history.capacity) {
+        history.start = (history.start + 1) % history.capacity;
+        history.count -= 1;
+      }
+      const index = (history.start + history.count) % history.capacity;
+      history.time[index] = sample.time;
+      history.temperature[index] = sample.temperature;
+      history.humidity[index] = sample.humidity;
+      history.pressure[index] = sample.pressure;
+      history.temperatureState[index] = sample.temperatureState;
+      history.humidityState[index] = sample.humidityState;
+      history.pressureState[index] = sample.pressureState;
+      history.count += 1;
+    }
+
+    function historySampleAt(index) {
+      if (index < 0 || index >= history.count) { return null; }
+      const slot = (history.start + index) % history.capacity;
+      return {
+        time: history.time[slot],
+        temperature: history.temperature[slot],
+        humidity: history.humidity[slot],
+        pressure: history.pressure[slot],
+        temperatureState: STATE_BY_CODE[history.temperatureState[slot]] || DATA_STATES.ERROR,
+        humidityState: STATE_BY_CODE[history.humidityState[slot]] || DATA_STATES.ERROR,
+        pressureState: STATE_BY_CODE[history.pressureState[slot]] || DATA_STATES.ERROR
+      };
+    }
+
+    function historyMetricValue(sample, metricKey) {
+      if (!sample) { return null; }
+      const value = sample[metricKey];
+      return (typeof value === 'number' && isFinite(value)) ? value : null;
+    }
+
+    function historyMetricState(sample, metricKey) {
+      if (!sample) { return DATA_STATES.ERROR; }
+      return sample[metricKey + 'State'] || DATA_STATES.ERROR;
+    }
+
+    // Decides whether this poll becomes a history point (adaptive sampling).
+    function sampleHistory(normalized, nowMs) {
+      const preset = activeHistoryPreset();
+      if (history.count > 0 && nowMs - history.lastSampleAt < preset.sampleMs) {
+        return false;
+      }
+      const stamp = history.count > 0 ? Math.max(nowMs, history.lastSampleAt + 1) : nowMs;
+      const context = { offline: false };
+
+      const states = {
+        temperature: getTemperatureState(normalized.temperature, context).dataState,
+        humidity: getHumidityState(normalized.humidity, context).dataState,
+        pressure: getPressureState(normalized.pressure, context).dataState
+      };
+      const toStored = function (value) {
+        return (value === null || !isFinite(value)) ? NaN : value;  // null stays null
+      };
+
+      historyPush({
+        time: stamp,
+        temperature: toStored(normalized.temperature.value),
+        humidity: toStored(normalized.humidity.value),
+        pressure: toStored(normalized.pressure.value),
+        temperatureState: STATE_CODES[states.temperature],
+        humidityState: STATE_CODES[states.humidity],
+        pressureState: STATE_CODES[states.pressure]
+      });
+      history.lastSampleAt = stamp;
+      history.totalSamples += 1;
+      return true;
+    }
+
+    function trimHistory(nowMs) {
+      const preset = activeHistoryPreset();
+      const windowStart = nowMs - preset.retentionMs;
+      let dropped = 0;
+      // The ring is time-ordered, so trimming the front is enough.
+      while (history.count > 0) {
+        const oldest = history.time[history.start];
+        if (oldest < windowStart) {
+          history.start = (history.start + 1) % history.capacity;
+          history.count -= 1;
+          dropped += 1;
+        } else { break; }
+      }
+      return dropped;
+    }
+
+    // Entry point called from the single polling cycle (no second timer).
+    function updateHistory(normalized, nowMs) {
+      const now = (typeof nowMs === 'number') ? nowMs : Date.now();
+      const added = sampleHistory(normalized, now);
+      trimHistory(now);
+      return added;
+    }
+
+    function resetHistory() {
+      history.start = 0;
+      history.count = 0;
+      history.lastSampleAt = 0;
+      history.totalSamples = 0;
+      uiState.hoverIndex = -1;
+    }
+
+    function historyRetentionMs() { return activeHistoryPreset().retentionMs; }
+
+    // Aggregates the visible window into per-metric series with their own Y scale.
+    function buildHistorySeries(nowMs, options) {
+      const settings = options || {};
+      const preset = activeHistoryPreset();
+      const now = (typeof nowMs === 'number') ? nowMs : Date.now();
+      const tMax = settings.tMax === undefined ? now : settings.tMax;
+      const tMin = settings.tMin === undefined ? (tMax - preset.retentionMs) : settings.tMin;
+      const gapMs = preset.sampleMs * HISTORY_CONFIG.gapFactor;
+      const withSeconds = (tMax - tMin) <= HISTORY_CONFIG.secondsInAxisBelowMs;
+
+      const visible = [];
+      for (let i = 0; i < history.count; i += 1) {
+        const sample = historySampleAt(i);
+        if (sample.time < tMin || sample.time > tMax) { continue; }
+        visible.push(sample);
+      }
+
+      const series = { tMin: tMin, tMax: tMax, count: visible.length, total: history.totalSamples, withSeconds: withSeconds, metrics: {} };
+
+      METRIC_KEYS.forEach(function (key) {
+        const points = [];
+        let min = null;
+        let max = null;
+        let latest = null;
+        let previousTime = null;
+        let segmentIndex = -1;
+        let segmentCounter = 0;
+
+        visible.forEach(function (sample) {
+          const value = historyMetricValue(sample, key);
+          const state = historyMetricState(sample, key);
+          const gap = previousTime !== null && (sample.time - previousTime) > gapMs;
+          previousTime = sample.time;
+
+          if (value === null) {
+            segmentIndex = -1;                       // missing data breaks the line
+            points.push({ time: sample.time, value: null, state: state, segment: -1 });
+            return;
+          }
+          // A new segment id is handed out for every gap, so the drawn path never
+          // connects across missing samples or long offline stretches.
+          if (gap || segmentIndex < 0) { segmentIndex = segmentCounter; segmentCounter += 1; }
+          if (min === null || value < min) { min = value; }
+          if (max === null || value > max) { max = value; }
+          latest = value;
+          points.push({ time: sample.time, value: value, state: state, segment: segmentIndex });
+        });
+
+        const range = historyYRange(key, min, max);
+        series.metrics[key] = {
+          key: key,
+          points: points,
+          min: min,
+          max: max,
+          latest: latest,
+          yMin: range.min,
+          yMax: range.max,
+          yTicks: range.ticks,
+          drawn: downsampledPoints(points, HISTORY_CONFIG.maxRenderPoints),
+          hasData: points.length > 0
+        };
+      });
+
+      series.xTicks = buildTimeTicks(tMin, tMax);
+      return series;
+    }
+
+    function historyYRange(metricKey, min, max) {
+      const config = HISTORY_CONFIG.yRanges[metricKey];
+      if (config.mode === 'fixed') {
+        return { min: config.min, max: config.max, ticks: [config.max, (config.max + config.min) / 2, config.min] };
+      }
+      let low = (min === null) ? null : min;
+      let high = (max === null) ? null : max;
+      if (low === null || high === null) {
+        // No data yet: fall back to the presentation range, never a fake 0..N.
+        const fallback = METRIC_CONFIG[metricKey].range;
+        low = fallback.min;
+        high = fallback.max;
+      }
+      let span = high - low;
+      if (span < config.minSpan) {
+        const centre = (high + low) / 2;
+        low = centre - config.minSpan / 2;
+        high = centre + config.minSpan / 2;
+        span = high - low;
+      }
+      const padding = span * config.paddingRatio;
+      low -= padding;
+      high += padding;
+      if (low < config.absoluteMin) { low = config.absoluteMin; }
+      if (high > config.absoluteMax) { high = config.absoluteMax; }
+      const decimals = METRIC_CONFIG[metricKey].decimals;
+      return {
+        min: low,
+        max: high,
+        ticks: [high, (high + low) / 2, low].map(function (value) {
+          return Number(value.toFixed(decimals === 0 ? 0 : 1));
+        })
+      };
+    }
+
+    // Rendering must not grow with the sample count: keep the extremes per bucket
+    // so peaks survive while the SVG stays small.
+    function downsampledPoints(points, limit) {
+      const drawn = [];
+      points.forEach(function (point) { if (point.value !== null) { drawn.push(point); } });
+      if (drawn.length <= limit) { return drawn; }
+
+      const buckets = Math.max(1, Math.floor(limit / 2));
+      const result = [];
+      const size = drawn.length / buckets;
+      for (let b = 0; b < buckets; b += 1) {
+        const from = Math.floor(b * size);
+        const to = Math.min(drawn.length, Math.floor((b + 1) * size));
+        if (to <= from) { continue; }
+        let minPoint = drawn[from];
+        let maxPoint = drawn[from];
+        for (let i = from; i < to; i += 1) {
+          if (drawn[i].value < minPoint.value) { minPoint = drawn[i]; }
+          if (drawn[i].value > maxPoint.value) { maxPoint = drawn[i]; }
+        }
+        const first = minPoint.time <= maxPoint.time ? minPoint : maxPoint;
+        const second = first === minPoint ? maxPoint : minPoint;
+        result.push(first);
+        if (second !== first) { result.push(second); }
+      }
+      return result;
+    }
+
+    function buildTimeTicks(tMin, tMax) {
+      const ticks = [];
+      const count = HISTORY_CONFIG.axisTicks;
+      for (let i = 0; i < count; i += 1) {
+        ticks.push(tMin + ((tMax - tMin) * i) / (count - 1));
+      }
+      return ticks;
+    }
+
+    /* =====================================================================
+       Layer 7 — animation helpers (bounded, single rAF loop, no endless work).
+       ===================================================================== */
+    const tweens = new Map();
+    let tweenRafId = null;
+
+    function prefersReducedMotion() {
+      return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    }
+
+    function runTweenFrame() {
+      tweenRafId = null;
+      const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      tweens.forEach(function (tween, node) {
+        const progress = Math.min(1, (now - tween.start) / tween.duration);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        const value = tween.from + (tween.to - tween.from) * eased;
+        node.textContent = value.toFixed(tween.decimals);
+        if (progress >= 1) {
+          node.textContent = tween.to.toFixed(tween.decimals);
+          tweens.delete(node);
+        }
+      });
+      if (tweens.size > 0) { tweenRafId = requestAnimationFrame(runTweenFrame); }
+    }
+
+    function tweenNumber(node, from, to, decimals) {
+      tweens.set(node, {
+        from: from,
+        to: to,
+        decimals: decimals,
+        duration: HISTORY_CONFIG.numberTweenMs,
+        start: (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()
+      });
+      if (tweenRafId === null) { tweenRafId = requestAnimationFrame(runTweenFrame); }
+    }
+
+    // Value text: tweened between polls, instant for missing data or reduced motion.
+    function setMetricValue(node, display, numericValue, decimals) {
+      if (!node) { return; }
+      const isNumber = (numericValue !== null && numericValue !== undefined && isFinite(numericValue));
+      const target = isNumber ? Number(numericValue).toFixed(decimals) : display;
+      if (node.__target === target) { return; }
+
+      const previous = node.__number;
+      node.__target = target;
+      node.__number = isNumber ? numericValue : null;
+
+      if (isNumber && previous !== null && previous !== undefined && !prefersReducedMotion()) {
+        tweenNumber(node, previous, numericValue, decimals);
+        return;
+      }
+      tweens.delete(node);
+      if (node.textContent !== target) { node.textContent = target; }
+    }
+
+    /* =====================================================================
+       Layer 8 — markup builders (called ONCE per panel).
+       ===================================================================== */
+    function iconMarkup(iconId, className) {
+      return '<svg class="icon ' + (className || '') + '" aria-hidden="true"><use href="#' + iconId + '"/></svg>';
+    }
+
+    function badgeMarkup() {
+      return '<span class="badge" data-data-state="ERROR" data-role="badge">ERROR</span>';
+    }
+
+    function scaleFootMarkup(metric) {
+      return '<span>возраст: <b data-role="age">—</b></span>' +
+        '<span>шкала: <b>' + metric.rangeMin + '…' + metric.rangeMax + ' ' + metric.unit + '</b></span>';
+    }
+
+    function numericMarkup(metric) {
+      return '<article class="card glass" data-metric="' + metric.key + '" data-role="card">' +
+        '<header class="card__head">' +
+          '<span class="card__icon">' + iconMarkup(metric.icon) + '</span>' +
+          '<div class="card__titles">' +
+            '<h2 class="card__title">' + metric.label + '</h2>' +
+            '<p class="card__source">' + metric.source + '</p>' +
+          '</div>' + badgeMarkup() +
+        '</header>' +
+        '<p class="card__value">' +
+          '<span class="card__number" data-role="value">—</span>' +
+          '<span class="card__unit">' + metric.unit + '</span>' +
+        '</p>' +
+        '<p class="card__foot">' + scaleFootMarkup(metric) + '</p>' +
+      '</article>';
+    }
+
+    function tickMarkup(metric) {
+      return metric.ticks.map(function (tick) {
+        const fraction = normalizeToRange(tick, metric.range);
+        return '<span class="track__tick" style="left:' + (fraction * 100).toFixed(2) + '%"></span>';
+      }).join('');
+    }
+
+    function horizontalMarkup(metric) {
+      return '<div class="hrow glass" data-metric="' + metric.key + '" data-role="card">' +
+        '<div class="hrow__head">' +
+          '<span class="card__icon">' + iconMarkup(metric.icon) + '</span>' +
+          '<span class="hrow__label">' + metric.label + '</span>' +
+          '<span class="hrow__value"><b data-role="value">—</b><i>' + metric.unit + '</i></span>' +
+          badgeMarkup() +
+        '</div>' +
+        '<div class="track" data-role="track" data-nodata="true" role="img" aria-label="' + metric.label + '">' +
+          tickMarkup(metric) +
+          '<div class="track__fill" data-role="fill"></div>' +
+          '<div class="track__knob" data-role="knob"></div>' +
+        '</div>' +
+        '<div class="hrow__scale"><span>' + metric.rangeMin + ' ' + metric.unit + '</span>' +
+          '<span>' + metric.source + '</span>' +
+          '<span>' + metric.rangeMax + ' ' + metric.unit + '</span></div>' +
+        '<p class="card__foot">' + scaleFootMarkup(metric) + '</p>' +
+      '</div>';
+    }
+
+    function barsMarkup(metric) {
+      const mid = Math.round((metric.range.min + metric.range.max) / 2);
+      return '<div class="bcol glass" data-metric="' + metric.key + '" data-role="card">' +
+        '<div class="bcol__head">' +
+          '<span class="card__icon">' + iconMarkup(metric.icon) + '</span>' +
+          '<h2 class="card__title">' + metric.label + '</h2>' + badgeMarkup() +
+        '</div>' +
+        '<div class="bcol__plot">' +
+          '<div class="bcol__axis"><span>' + metric.range.max + '</span><span>' + mid + '</span>' +
+            '<span>' + metric.range.min + '</span></div>' +
+          '<div class="bcol__track" data-role="track" data-nodata="true" role="img" aria-label="' + metric.label + '">' +
+            '<div class="bcol__bar" data-role="bar"></div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="bcol__value"><b data-role="value">—</b><i>' + metric.unit + '</i></div>' +
+        '<div class="bcol__range">шкала ' + metric.rangeMin + '…' + metric.rangeMax + ' ' + metric.unit + '</div>' +
+        '<p class="card__foot"><span>возраст: <b data-role="age">—</b></span></p>' +
+      '</div>';
+    }
+
+    function gaugeMarkup(metric) {
+      const geometry = GAUGE_GEOMETRY;
+      const circumference = 2 * Math.PI * geometry.radius;
+      const arc = circumference * geometry.sweepFraction;
+      return '<article class="card glass gauge" data-metric="' + metric.key + '" data-role="card" data-nodata="true">' +
+        '<svg class="gauge__svg" viewBox="0 0 120 120" role="img" aria-label="' + metric.label + '">' +
+          '<circle class="gauge__track" cx="' + geometry.cx + '" cy="' + geometry.cy + '" r="' + geometry.radius +
+            '" stroke-dasharray="' + arc.toFixed(2) + ' ' + circumference.toFixed(2) +
+            '" transform="rotate(135 ' + geometry.cx + ' ' + geometry.cy + ')"/>' +
+          '<circle class="gauge__progress" data-role="progress" cx="' + geometry.cx + '" cy="' + geometry.cy +
+            '" r="' + geometry.radius + '" stroke-dasharray="0 ' + circumference.toFixed(2) +
+            '" transform="rotate(135 ' + geometry.cx + ' ' + geometry.cy + ')"/>' +
+          '<use class="gauge__icon" href="#' + metric.icon + '" x="46" y="26" width="28" height="28"/>' +
+          '<text class="gauge__value" data-role="value" x="' + geometry.cx + '" y="76">—</text>' +
+          '<text class="gauge__unit" x="' + geometry.cx + '" y="94">' + metric.unit + '</text>' +
+        '</svg>' +
+        '<div class="gauge__meta"><h2 class="card__title">' + metric.label + '</h2>' + badgeMarkup() + '</div>' +
+        '<p class="gauge__scale">шкала ' + metric.rangeMin + '…' + metric.rangeMax + ' ' + metric.unit +
+          ' · возраст: <b data-role="age">—</b></p>' +
+      '</article>';
+    }
+
+    function historyMarkup() {
+      const chips = HISTORY_CONFIG.presets.map(function (preset) {
+        return '<button type="button" class="chip" data-preset="' + preset.id + '" aria-pressed="false">' +
+          preset.label + '</button>';
+      }).join('');
+
+      const rows = METRIC_KEYS.map(function (key) {
+        const config = METRIC_CONFIG[key];
+        return '<div class="tt__row" data-metric="' + key + '">' +
+          iconMarkup(config.icon) +
+          '<span class="tt__value" data-role="tt-value-' + key + '">—</span>' +
+          '<span class="tt__unit">' + config.unit + '</span>' +
+          '<span class="tt__state" data-data-state="ERROR" data-role="tt-state-' + key + '">—</span>' +
+        '</div>';
+      }).join('');
+
+      return '<div class="history glass" data-role="history">' +
+        '<header class="history__head">' +
+          '<div class="history__title">' +
+            '<h2>История</h2>' +
+            '<p class="history__sub" data-role="summary">Собираем историю…</p>' +
+          '</div>' +
+          '<div class="history__actions">' +
+            '<label class="visually-hidden" for="history-retention">Период хранения истории</label>' +
+            '<select class="history__select" id="history-retention" data-role="retention-select"></select>' +
+            '<button type="button" class="btn" data-role="clear">Очистить историю</button>' +
+          '</div>' +
+        '</header>' +
+        '<div class="chips" role="group" aria-label="Быстрый выбор периода истории" data-role="chips">' + chips + '</div>' +
+        '<p class="history__hint" data-role="hint"></p>' +
+        '<div class="chart" data-role="chart" tabindex="0" role="group"' +
+          ' aria-label="График истории. Стрелки влево и вправо перемещают курсор по точкам.">' +
+          '<svg class="chart__svg" data-role="chart-svg" role="img" aria-label="История измерений"></svg>' +
+          '<div class="chart__tooltip" data-role="tooltip" hidden>' +
+            '<div class="tt__time" data-role="tt-time">—</div>' + rows +
+          '</div>' +
+        '</div>' +
+        '<p class="chart__empty" data-role="empty" hidden>' +
+          '<b>Собираем историю…</b>' +
+          '<span>Первые точки появятся после получения данных от метеостанции.</span>' +
+        '</p>' +
+        '<div class="history__table visually-hidden" data-role="table-wrap">' +
+          '<h3>Последние точки истории</h3>' +
+          '<table><caption>История измерений (текстовая альтернатива графику)</caption>' +
+            '<thead><tr><th scope="col">Время</th><th scope="col">Температура, °C</th>' +
+            '<th scope="col">Влажность, %</th><th scope="col">Давление, hPa</th><th scope="col">Состояние</th></tr></thead>' +
+            '<tbody data-role="table-body"></tbody></table>' +
+        '</div>' +
+      '</div>';
+    }
+
+    function collectRefs(root) {
+      const metrics = {};
+      METRIC_KEYS.forEach(function (key) {
+        const scope = root.querySelector('[data-metric="' + key + '"]');
+        if (!scope) { return; }
+        metrics[key] = {
+          scope: scope,
+          badge: scope.querySelector('[data-role="badge"]'),
+          value: scope.querySelector('[data-role="value"]'),
+          age: scope.querySelector('[data-role="age"]'),
+          track: scope.querySelector('[data-role="track"]'),
+          fill: scope.querySelector('[data-role="fill"]'),
+          knob: scope.querySelector('[data-role="knob"]'),
+          bar: scope.querySelector('[data-role="bar"]'),
+          progress: scope.querySelector('[data-role="progress"]')
+        };
+      });
+      return { metrics: metrics };
+    }
+
+    function buildPanels() {
+      METRIC_KEYS.forEach(function (key) {
+        const config = METRIC_CONFIG[key];
+        config.rangeMin = config.range.min;
+        config.rangeMax = config.range.max;
+      });
+
+      const roots = {
+        numeric: document.getElementById('panel-numeric'),
+        horizontal: document.getElementById('panel-horizontal'),
+        bars: document.getElementById('panel-bars'),
+        gauges: document.getElementById('panel-gauges'),
+        history: document.getElementById('panel-history')
+      };
+      const builders = {
+        numeric: numericMarkup,
+        horizontal: horizontalMarkup,
+        bars: barsMarkup,
+        gauges: gaugeMarkup
+      };
+      const wrappers = {
+        numeric: '<div class="grid">',
+        horizontal: '<div class="hrows">',
+        bars: '<div class="barchart">',
+        gauges: '<div class="gauges">'
+      };
+
+      MODES.forEach(function (mode) {
+        const root = roots[mode];
+        dom.panelRoots[mode] = root || null;
+        if (!root) { dom.refs[mode] = { metrics: {} }; return; }
+        if (mode === 'history') {
+          root.innerHTML = historyMarkup();
+          dom.refs.history = buildHistoryRefs(root);
+          return;
+        }
+        root.innerHTML = wrappers[mode] + METRIC_KEYS.map(function (key) {
+          return builders[mode](METRIC_CONFIG[key]);
+        }).join('') + '</div>';
+        dom.refs[mode] = collectRefs(root);
+      });
+    }
+
+    /* =====================================================================
+       Layer 9 — rendering. Renderers consume uiModel only.
+       ===================================================================== */
+    function setText(node, text) {
+      if (node && node.textContent !== text) { node.textContent = text; }
+    }
+
+    function applyMetricChrome(nodes, metric) {
+      if (!nodes || !nodes.scope) { return; }
+      const scope = nodes.scope;
+      if (metric.colorRole) {
+        if (scope.dataset.tone !== metric.colorRole) { scope.dataset.tone = metric.colorRole; }
+      } else if (scope.dataset.tone) {
+        delete scope.dataset.tone;
+      }
+      if (scope.dataset.dataState !== metric.dataState) { scope.dataset.dataState = metric.dataState; }
+
+      if (nodes.badge) {
+        setText(nodes.badge, metric.dataState);
+        if (nodes.badge.dataset.dataState !== metric.dataState) {
+          nodes.badge.dataset.dataState = metric.dataState;
+        }
+      }
+      setMetricValue(nodes.value, metric.display, metric.value, metric.decimals);
+      setText(nodes.age, metric.ageText);
+      scope.setAttribute('aria-label',
+        metric.label + ': ' + metric.display + ' ' + metric.unit + ', ' + metric.dataState);
+    }
+
+    function renderNumeric(model) {
+      model.metrics.forEach(function (metric) {
+        applyMetricChrome(dom.refs.numeric.metrics[metric.key], metric);
+      });
+    }
+
+    function renderHorizontal(model) {
+      model.metrics.forEach(function (metric) {
+        const nodes = dom.refs.horizontal.metrics[metric.key];
+        applyMetricChrome(nodes, metric);
+        if (!nodes || !nodes.track) { return; }
+        const noData = !metric.hasData;
+        if (nodes.track.dataset.nodata !== String(noData)) {
+          nodes.track.dataset.nodata = String(noData);
+        }
+        const percent = noData ? 0 : metric.fraction * 100;
+        if (nodes.fill) { nodes.fill.style.width = percent.toFixed(2) + '%'; }
+        if (nodes.knob) { nodes.knob.style.left = percent.toFixed(2) + '%'; }
+      });
+    }
+
+    function renderBars(model) {
+      model.metrics.forEach(function (metric) {
+        const nodes = dom.refs.bars.metrics[metric.key];
+        applyMetricChrome(nodes, metric);
+        if (!nodes || !nodes.track) { return; }
+        const noData = !metric.hasData;
+        if (nodes.track.dataset.nodata !== String(noData)) {
+          nodes.track.dataset.nodata = String(noData);
+        }
+        if (nodes.bar) {
+          nodes.bar.style.height = (noData ? 0 : metric.fraction * 100).toFixed(2) + '%';
+        }
+      });
+    }
+
+    function renderGauges(model) {
+      const circumference = 2 * Math.PI * GAUGE_GEOMETRY.radius;
+      const arc = circumference * GAUGE_GEOMETRY.sweepFraction;
+      model.metrics.forEach(function (metric) {
+        const nodes = dom.refs.gauges.metrics[metric.key];
+        applyMetricChrome(nodes, metric);
+        if (!nodes || !nodes.scope) { return; }
+        const noData = !metric.hasData;
+        if (nodes.scope.dataset.nodata !== String(noData)) {
+          nodes.scope.dataset.nodata = String(noData);
+        }
+        if (nodes.progress) {
+          const filled = noData ? 0 : metric.fraction * arc;
+          nodes.progress.setAttribute('stroke-dasharray',
+            filled.toFixed(2) + ' ' + circumference.toFixed(2));
+        }
+      });
+    }
+
+    function renderDataState(model) {
+      if (dom.connection && dom.connection.dataset.dataState !== model.worstState) {
+        dom.connection.dataset.dataState = model.worstState;
+      }
+      return model.worstState;
+    }
+
+    function renderConnectionState() {
+      const online = uiState.connection === CONNECTION_STATES.ONLINE;
+      if (dom.connection) { dom.connection.dataset.state = uiState.connection; }
+      setText(dom.connectionLabel, uiState.connection);
+
+      let meta;
+      if (uiState.lastSuccessAt === null) {
+        meta = uiState.lastErrorMessage
+          ? 'нет связи (' + uiState.lastErrorMessage + ')'
+          : 'обновление: ожидание…';
+      } else if (online) {
+        meta = 'обновление: ' + formatClock(uiState.lastSuccessAt, true) +
+          ' (' + formatAge(Date.now() - uiState.lastSuccessAt) + ' назад)';
+      } else {
+        meta = 'последнее: ' + formatClock(uiState.lastSuccessAt, true) +
+          ' · ошибка: ' + (uiState.lastErrorMessage || 'сеть недоступна');
+      }
+      setText(dom.connectionMeta, meta);
+
+      if (dom.uptime) {
+        setText(dom.uptime, uiState.weather ? formatDuration(uiState.weather.uptimeMs) : '—');
+      }
+      if (dom.pollInterval) {
+        const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+        setText(dom.pollInterval,
+          (hidden ? APP_CONFIG.pollIntervalHiddenMs : APP_CONFIG.pollIntervalMs) + ' мс');
+      }
+    }
+
+    function renderCurrentMode() {
+      const model = buildUiModel();
+      uiState.uiModel = model;
+
+      if (uiState.activeMode === 'horizontal') { renderHorizontal(model); }
+      else if (uiState.activeMode === 'bars') { renderBars(model); }
+      else if (uiState.activeMode === 'gauges') { renderGauges(model); }
+      else if (uiState.activeMode === 'history') { renderHistory(model); }
+      else { renderNumeric(model); }
+
+      renderDataState(model);
+      renderConnectionState();
+      return model;
+    }
+
+    /* =====================================================================
+       Layer 10 — history presentation: chart, tooltip, table, controls.
+       ===================================================================== */
+    const NS = 'http://www.w3.org/2000/svg';
+
+    function svgEl(name, attrs) {
+      const node = document.createElementNS(NS, name);
+      if (attrs) {
+        Object.keys(attrs).forEach(function (key) { node.setAttribute(key, attrs[key]); });
+      }
+      return node;
+    }
+
+    function buildHistoryRefs(root) {
+      const refs = {
+        root: root,
+        summary: root.querySelector('[data-role="summary"]'),
+        hint: root.querySelector('[data-role="hint"]'),
+        select: root.querySelector('[data-role="retention-select"]'),
+        chips: Array.prototype.slice.call(root.querySelectorAll('[data-preset]')),
+        clear: root.querySelector('[data-role="clear"]'),
+        chart: root.querySelector('[data-role="chart"]'),
+        svg: root.querySelector('[data-role="chart-svg"]'),
+        tooltip: root.querySelector('[data-role="tooltip"]'),
+        ttTime: root.querySelector('[data-role="tt-time"]'),
+        empty: root.querySelector('[data-role="empty"]'),
+        tableBody: root.querySelector('[data-role="table-body"]'),
+        tt: {},
+        lanes: {},
+        axes: { xLabels: [], xGrid: [], cursorX: null },
+        cursor: null,
+        signature: '',
+        tableSignature: ''
+      };
+
+      METRIC_KEYS.forEach(function (key) {
+        refs.tt[key] = {
+          value: root.querySelector('[data-role="tt-value-' + key + '"]'),
+          state: root.querySelector('[data-role="tt-state-' + key + '"]')
+        };
+      });
+
+      // Retention controls: native select (screen readers, mobile pickers) plus
+      // preset chips for one-tap switching. Listeners are attached once.
+      HISTORY_CONFIG.presets.forEach(function (preset) {
+        const option = document.createElement('option');
+        option.value = preset.id;
+        option.textContent = preset.label + ' — ' + formatDurationShort(preset.retentionMs);
+        refs.select.appendChild(option);
+      });
+      refs.select.addEventListener('change', function () {
+        setHistoryRetention(refs.select.value);
+      });
+      refs.chips.forEach(function (chip) {
+        chip.addEventListener('click', function () { setHistoryRetention(chip.dataset.preset); });
+      });
+      refs.clear.addEventListener('click', onClearHistoryClick);
+
+      // Chart interaction: one set of listeners, attached once.
+      refs.chart.addEventListener('pointermove', onChartPointerMove);
+      refs.chart.addEventListener('pointerdown', onChartPointerMove);
+      refs.chart.addEventListener('pointerleave', onChartPointerLeave);
+      refs.chart.addEventListener('pointercancel', onChartPointerLeave);
+      refs.chart.addEventListener('keydown', onChartKeydown);
+      refs.chart.addEventListener('blur', onChartPointerLeave);
+
+      buildChartSkeleton(refs);
+      return refs;
+    }
+
+    // The SVG skeleton is created once; only attributes change afterwards.
+    function buildChartSkeleton(refs) {
+      const svg = refs.svg;
+      while (svg.firstChild) { svg.removeChild(svg.firstChild); }
+
+      const defs = svgEl('defs');
+      METRIC_KEYS.forEach(function (key) {
+        const gradient = svgEl('linearGradient', {
+          id: 'hist-grad-' + key, gradientUnits: 'userSpaceOnUse', x1: '0', y1: '0', x2: '0', y2: '100'
+        });
+        gradient.appendChild(svgEl('stop', { offset: '0%', 'stop-color': 'var(--metric-' + key + ')', 'stop-opacity': '0.55' }));
+        gradient.appendChild(svgEl('stop', { offset: '100%', 'stop-color': 'var(--metric-' + key + ')', 'stop-opacity': '0' }));
+        defs.appendChild(gradient);
+      });
+      svg.appendChild(defs);
+
+      const area = svgEl('g', { 'data-role': 'plot' });
+      svg.appendChild(area);
+      refs.plot = area;
+
+      METRIC_KEYS.forEach(function (key) {
+        const lane = {
+          frame: svgEl('rect', { class: 'chart__lane-frame', rx: '8' }),
+          grid: svgEl('g', { class: 'chart__grid' }),
+          fill: svgEl('path', { 'data-metric': key, fill: 'url(#hist-grad-' + key + ')', stroke: 'none', opacity: '0.5' }),
+          line: svgEl('path', { class: 'chart__line', 'data-metric': key, 'data-state': 'FRESH', d: '' }),
+          dots: svgEl('g', {}),
+          current: svgEl('circle', { class: 'chart__current', r: '3.5', 'data-metric': key, cx: '-10', cy: '-10' }),
+          label: svgEl('text', { class: 'chart__lane-label' }),
+          yLabels: [
+            svgEl('text', { class: 'chart__ylist', 'text-anchor': 'end' }),
+            svgEl('text', { class: 'chart__ylist', 'text-anchor': 'end' }),
+            svgEl('text', { class: 'chart__ylist', 'text-anchor': 'end' })
+          ],
+          yGrid: [svgEl('line', { class: 'chart__grid' }), svgEl('line', { class: 'chart__grid' }), svgEl('line', { class: 'chart__grid' })]
+        };
+        lane.dotPool = [];
+        for (let i = 0; i < HISTORY_CHART.poolDots; i += 1) {
+          const dot = svgEl('circle', { class: 'chart__dot', r: '2.6', cx: '-10', cy: '-10', 'data-state': 'STALE' });
+          dot.style.display = 'none';
+          lane.dotPool.push(dot);
+          lane.dots.appendChild(dot);
+        }
+        lane.yGrid.forEach(function (node) { area.appendChild(node); });
+        area.appendChild(lane.fill);
+        area.appendChild(lane.line);
+        area.appendChild(lane.dots);
+        area.appendChild(lane.current);
+        area.appendChild(lane.frame);
+        lane.yLabels.forEach(function (node) { area.appendChild(node); });
+        area.appendChild(lane.label);
+        refs.lanes[key] = lane;
+      });
+
+      for (let i = 0; i < HISTORY_CONFIG.axisTicks; i += 1) {
+        refs.axes.xGrid.push(svgEl('line', { class: 'chart__grid chart__grid--v' }));
+        refs.axes.xLabels.push(svgEl('text', { class: 'chart__xlist', 'text-anchor': 'middle' }));
+      }
+      refs.axes.xGrid.forEach(function (node) { area.appendChild(node); });
+      refs.axes.xLabels.forEach(function (node) { area.appendChild(node); });
+
+      refs.cursor = svgEl('g', { 'data-role': 'cursor' });
+      refs.axes.cursorX = svgEl('line', { class: 'chart__cursor' });
+      refs.cursor.appendChild(refs.axes.cursorX);
+      refs.cursorDots = {};
+      METRIC_KEYS.forEach(function (key) {
+        const dot = svgEl('circle', { class: 'chart__cursor-dot', r: '3', cx: '-10', cy: '-10', 'data-metric': key });
+        refs.cursorDots[key] = dot;
+        refs.cursor.appendChild(dot);
+      });
+      refs.cursor.style.display = 'none';
+      area.appendChild(refs.cursor);
+    }
+
+    function chartGeometry(width) {
+      const laneHeight = width < 420 ? HISTORY_CHART.laneHeights.small
+        : (width < 760 ? HISTORY_CHART.laneHeights.medium : HISTORY_CHART.laneHeights.large);
+      const padLeft = width < 420 ? 33 : 44;
+      const padRight = 10;
+      const lanePadTop = 22;
+      const lanePadBottom = 10;
+      const axisLabelSpace = 16;
+      const height = laneHeight * METRIC_KEYS.length + axisLabelSpace;
+      return {
+        width: width,
+        height: height,
+        padLeft: padLeft,
+        padRight: padRight,
+        laneHeight: laneHeight,
+        lanePadTop: lanePadTop,
+        lanePadBottom: lanePadBottom,
+        plotWidth: Math.max(10, width - padLeft - padRight),
+        axisLabelSpace: axisLabelSpace
+      };
+    }
+
+    function historySeriesFor(metricKey, series) {
+      return series.metrics[metricKey] || null;
+    }
+
+    function renderHistoryChart(series, geometry) {
+      const refs = dom.refs.history;
+      if (!refs) { return; }
+      refs.svg.setAttribute('viewBox', '0 0 ' + geometry.width + ' ' + geometry.height);
+      refs.svg.setAttribute('width', String(geometry.width));
+      refs.svg.setAttribute('height', String(geometry.height));
+
+      const span = Math.max(1, series.tMax - series.tMin);
+      const xFor = function (time) {
+        return geometry.padLeft + ((time - series.tMin) / span) * geometry.plotWidth;
+      };
+
+      METRIC_KEYS.forEach(function (key, laneIndex) {
+        const lane = refs.lanes[key];
+        const metric = series.metrics[key];
+        const laneTop = laneIndex * geometry.laneHeight;
+        const plotTop = laneTop + geometry.lanePadTop;
+        const plotHeight = geometry.laneHeight - geometry.lanePadTop - geometry.lanePadBottom;
+        const ySpan = Math.max(0.0001, metric.yMax - metric.yMin);
+        const yFor = function (value) {
+          return plotTop + plotHeight - ((value - metric.yMin) / ySpan) * plotHeight;
+        };
+
+        lane.frame.setAttribute('x', '0.5');
+        lane.frame.setAttribute('y', String(laneTop + 0.5));
+        lane.frame.setAttribute('width', String(geometry.width - 1));
+        lane.frame.setAttribute('height', String(geometry.laneHeight - 1));
+
+        const config = METRIC_CONFIG[key];
+        lane.label.setAttribute('x', '6');
+        lane.label.setAttribute('y', String(laneTop + 12));
+        lane.label.textContent = config.label + ', ' + config.unit;
+
+        metric.yTicks.forEach(function (tick, tickIndex) {
+          const y = yFor(tick);
+          const grid = lane.yGrid[tickIndex];
+          grid.setAttribute('x1', String(geometry.padLeft));
+          grid.setAttribute('x2', String(geometry.width - geometry.padRight));
+          grid.setAttribute('y1', y.toFixed(1));
+          grid.setAttribute('y2', y.toFixed(1));
+          const label = lane.yLabels[tickIndex];
+          label.setAttribute('x', String(geometry.padLeft - 5));
+          label.setAttribute('y', (y + 3).toFixed(1));
+          label.textContent = String(tick);
+        });
+
+        // Line segments: null values and long gaps break the path (no fake data).
+        const segments = [];
+        let activeSegment = null;
+        metric.drawn.forEach(function (point) {
+          const x = xFor(point.time).toFixed(1);
+          const y = yFor(point.value).toFixed(1);
+          if (activeSegment === null || point.segment !== activeSegment.id) {
+            activeSegment = { id: point.segment, points: [] };
+            segments.push(activeSegment);
+          }
+          activeSegment.points.push(x + ',' + y);
+        });
+
+        let d = '';
+        let fillD = '';
+        segments.forEach(function (segment) {
+          if (segment.points.length === 0) { return; }
+          d += 'M' + segment.points.join('L');
+          if (segment.points.length > 1) {
+            const firstX = segment.points[0].split(',')[0];
+            const lastX = segment.points[segment.points.length - 1].split(',')[0];
+            fillD += 'M' + firstX + ',' + (plotTop + plotHeight).toFixed(1) + 'L' +
+              segment.points.join('L') + 'L' + lastX + ',' + (plotTop + plotHeight).toFixed(1) + 'Z';
+          }
+        });
+        lane.line.setAttribute('d', d);
+        lane.fill.setAttribute('d', fillD);
+
+        const latest = metric.points.filter(function (point) { return point.value !== null; }).pop();
+        const latestState = latest ? latest.state : DATA_STATES.ERROR;
+        if (lane.line.dataset.state !== latestState) { lane.line.dataset.state = latestState; }
+        if (latest) {
+          lane.current.setAttribute('cx', xFor(latest.time).toFixed(1));
+          lane.current.setAttribute('cy', yFor(latest.value).toFixed(1));
+          lane.current.setAttribute('fill', 'var(--metric-' + key + ')');
+        } else {
+          lane.current.setAttribute('cx', '-10');
+        }
+
+        // Non-FRESH samples get their own small marker so the metric colour stays intact.
+        let poolIndex = 0;
+        metric.drawn.forEach(function (point) {
+          if (poolIndex >= lane.dotPool.length) { return; }
+          if (point.state === DATA_STATES.FRESH) { return; }
+          const dot = lane.dotPool[poolIndex];
+          dot.setAttribute('cx', xFor(point.time).toFixed(1));
+          dot.setAttribute('cy', yFor(point.value).toFixed(1));
+          dot.setAttribute('data-state', point.state);
+          dot.style.display = '';
+          poolIndex += 1;
+        });
+        for (let i = poolIndex; i < lane.dotPool.length; i += 1) {
+          lane.dotPool[i].style.display = 'none';
+        }
+
+        lane.__yFor = yFor;
+        lane.__xFor = xFor;
+        lane.__index = laneIndex;
+      });
+
+      refs.axes.xLabels.forEach(function (label, index) {
+        const time = series.xTicks[index];
+        const x = xFor(time);
+        label.setAttribute('x', x.toFixed(1));
+        label.setAttribute('y', String(geometry.height - 4));
+        label.textContent = formatClock(time, series.withSeconds);
+        const grid = refs.axes.xGrid[index];
+        grid.setAttribute('x1', x.toFixed(1));
+        grid.setAttribute('x2', x.toFixed(1));
+        grid.setAttribute('y1', '0');
+        grid.setAttribute('y2', String(geometry.height - geometry.axisLabelSpace));
+      });
+
+      refs.geometry = geometry;
+      refs.series = series;
+      refs.svg.setAttribute('aria-label', historyAriaLabel(series));
+    }
+
+    function historyAriaLabel(series) {
+      if (series.count === 0) {
+        return 'История измерений: пока нет точек. Первые точки появятся после получения данных.';
+      }
+      const parts = METRIC_KEYS.map(function (key) {
+        const metric = series.metrics[key];
+        if (metric.min === null) { return METRIC_CONFIG[key].label + ': нет данных'; }
+        const decimals = METRIC_CONFIG[key].decimals;
+        return METRIC_CONFIG[key].label + ' от ' + metric.min.toFixed(decimals) + ' до ' +
+          metric.max.toFixed(decimals) + ' ' + METRIC_CONFIG[key].unit;
+      });
+      return 'История измерений: ' + series.count + ' точек за ' +
+        formatDurationShort(series.tMax - series.tMin) + '. ' + parts.join('. ') + '.';
+    }
+
+    function renderHistoryTooltip() {
+      const refs = dom.refs.history;
+      const series = refs && refs.series;
+      if (!refs || !series) { return; }
+
+      const index = uiState.hoverIndex;
+      if (index < 0 || index >= history.count) {
+        refs.tooltip.hidden = true;
+        if (refs.cursor) { refs.cursor.style.display = 'none'; }
+        return;
+      }
+
+      const sample = historySampleAt(index);
+      if (!sample) {
+        refs.tooltip.hidden = true;
+        if (refs.cursor) { refs.cursor.style.display = 'none'; }
+        return;
+      }
+
+      const geometry = refs.geometry;
+      const span = Math.max(1, series.tMax - series.tMin);
+      const x = geometry.padLeft + ((sample.time - series.tMin) / span) * geometry.plotWidth;
+
+      refs.tooltip.hidden = false;
+      refs.ttTime.textContent = formatClock(sample.time, true);
+      METRIC_KEYS.forEach(function (key) {
+        const value = historyMetricValue(sample, key);
+        const state = historyMetricState(sample, key);
+        const target = refs.tt[key];
+        const decimals = METRIC_CONFIG[key].decimals;
+        setText(target.value, value === null ? '—' : value.toFixed(decimals));
+        setText(target.state, state);
+        if (target.state.dataset.dataState !== state) { target.state.dataset.dataState = state; }
+      });
+
+      const tooltipWidth = refs.tooltip.offsetWidth || 160;
+      const maxLeft = Math.max(4, geometry.width - tooltipWidth - 4);
+      refs.tooltip.style.left = Math.max(4, Math.min(maxLeft, x - tooltipWidth / 2)) + 'px';
+      refs.tooltip.style.top = '8px';
+
+      refs.cursor.style.display = '';
+      refs.axes.cursorX.setAttribute('x1', x.toFixed(1));
+      refs.axes.cursorX.setAttribute('x2', x.toFixed(1));
+      refs.axes.cursorX.setAttribute('y1', '0');
+      refs.axes.cursorX.setAttribute('y2', String(geometry.height - geometry.axisLabelSpace));
+      METRIC_KEYS.forEach(function (key) {
+        const lane = refs.lanes[key];
+        const value = historyMetricValue(sample, key);
+        const dot = refs.cursorDots[key];
+        if (value === null) { dot.setAttribute('cx', '-10'); return; }
+        dot.setAttribute('cx', x.toFixed(1));
+        dot.setAttribute('cy', lane.__yFor(value).toFixed(1));
+        dot.setAttribute('fill', 'var(--metric-' + key + ')');
+      });
+    }
+
+    function renderHistoryTable(series) {
+      const refs = dom.refs.history;
+      if (!refs || !refs.tableBody) { return; }
+      const rows = Math.min(8, history.count);
+      const signature = history.totalSamples + '|' + history.count + '|' + uiState.historyPresetId + '|' + rows;
+      if (refs.tableSignature === signature) { return; }
+      refs.tableSignature = signature;
+
+      const html = [];
+      for (let i = history.count - rows; i < history.count; i += 1) {
+        const sample = historySampleAt(i);
+        if (!sample) { continue; }
+        const cells = METRIC_KEYS.map(function (key) {
+          const value = historyMetricValue(sample, key);
+          return '<td>' + (value === null ? '—' : value.toFixed(METRIC_CONFIG[key].decimals)) + '</td>';
+        }).join('');
+        const state = historyMetricState(sample, 'temperature');
+        html.push('<tr><td>' + formatClock(sample.time, true) + '</td>' + cells + '<td>' + state + '</td></tr>');
+      }
+      refs.tableBody.innerHTML = html.join('');
+    }
+
+    function renderHistory(model) {
+      const refs = dom.refs.history;
+      if (!refs) { return; }
+      const preset = activeHistoryPreset();
+      const now = Date.now();
+      const series = buildHistorySeries(now);
+
+      // Controls reflect application state.
+      if (refs.select.value !== preset.id) { refs.select.value = preset.id; }
+      refs.chips.forEach(function (chip) {
+        const pressed = chip.dataset.preset === preset.id ? 'true' : 'false';
+        if (chip.getAttribute('aria-pressed') !== pressed) { chip.setAttribute('aria-pressed', pressed); }
+      });
+
+      const stepText = preset.sampleMs >= 60000
+        ? (preset.sampleMs / 60000) + ' мин'
+        : (preset.sampleMs / 1000) + ' с';
+      setText(refs.summary, 'Хранение: ' + preset.label + ' · шаг ' + stepText + ' · точек ' +
+        history.count + '/' + history.capacity + ' · собрано ' + history.totalSamples);
+      setText(refs.hint, 'История живёт в памяти этой вкладки (не в ESP32) и собирается из тех же ' +
+        'ответов /api/weather — отдельного запроса и таймера нет. Смена периода пересобирает буфер.');
+
+      const isEmpty = history.count === 0;
+      refs.empty.hidden = !isEmpty;
+      refs.chart.hidden = isEmpty;
+
+      if (isEmpty) {
+        uiState.hoverIndex = -1;
+        refs.tooltip.hidden = true;
+        setText(refs.summary, 'Собираем историю… Период: ' + preset.label + ' · шаг ' + stepText);
+        renderHistoryTable(series);
+        return;
+      }
+
+      const width = Math.max(180, Math.round(refs.chart.clientWidth || refs.root.clientWidth || 320) - 12);
+      const geometry = chartGeometry(width);
+      renderHistoryChart(series, geometry);
+      if (uiState.hoverIndex >= history.count) { uiState.hoverIndex = history.count - 1; }
+      renderHistoryTooltip();
+      renderHistoryTable(series);
+    }
+
+    /* =====================================================================
+       Layer 11 — history interactions.
+       ===================================================================== */
+    function setHistoryRetention(presetId) {
+      const preset = historyConfigure(presetId, Date.now());
+      uiState.hoverIndex = -1;
+      dom.refs.history.tableSignature = '';
+      if (uiState.activeMode === 'history') { renderHistory(uiState.uiModel); }
+      return preset;
+    }
+
+    function onClearHistoryClick() {
+      const button = dom.refs.history.clear;
+      if (!uiState.clearArmed) {
+        uiState.clearArmed = true;
+        button.dataset.armed = 'true';
+        button.textContent = 'Подтвердить очистку';
+        if (uiState.clearTimer) { clearTimeout(uiState.clearTimer); }
+        uiState.clearTimer = setTimeout(function () {
+          uiState.clearArmed = false;
+          uiState.clearTimer = null;
+          button.dataset.armed = 'false';
+          button.textContent = 'Очистить историю';
+        }, 4000);
+        return;
+      }
+      if (uiState.clearTimer) { clearTimeout(uiState.clearTimer); uiState.clearTimer = null; }
+      uiState.clearArmed = false;
+      button.dataset.armed = 'false';
+      button.textContent = 'Очистить историю';
+      resetHistory();
+      dom.refs.history.tableSignature = '';
+      renderHistory(uiState.uiModel);
+    }
+
+    function historyIndexFromClientX(clientX) {
+      const refs = dom.refs.history;
+      if (!refs || !refs.geometry || history.count === 0) { return -1; }
+      const rect = refs.svg.getBoundingClientRect();
+      if (rect.width <= 0) { return -1; }
+      const scale = refs.geometry.width / rect.width;
+      const localX = (clientX - rect.left) * scale;
+      const ratio = (localX - refs.geometry.padLeft) / refs.geometry.plotWidth;
+      const targetTime = refs.series.tMin + Math.max(0, Math.min(1, ratio)) * (refs.series.tMax - refs.series.tMin);
+
+      let best = -1;
+      let bestDistance = Infinity;
+      for (let i = 0; i < history.count; i += 1) {
+        const sample = historySampleAt(i);
+        const distance = Math.abs(sample.time - targetTime);
+        if (distance < bestDistance) { bestDistance = distance; best = i; }
+      }
+      return best;
+    }
+
+    function onChartPointerMove(event) {
+      const index = historyIndexFromClientX(event.clientX);
+      if (index < 0 || index === uiState.hoverIndex) {
+        if (index < 0) { renderHistoryTooltip(); }
+        return;
+      }
+      uiState.hoverIndex = index;
+      renderHistoryTooltip();
+    }
+
+    function onChartPointerLeave() {
+      if (uiState.hoverIndex === -1) { return; }
+      uiState.hoverIndex = -1;
+      renderHistoryTooltip();
+    }
+
+    function onChartKeydown(event) {
+      if (history.count === 0) { return; }
+      let index = uiState.hoverIndex;
+      if (event.key === 'ArrowLeft') { index = index < 0 ? history.count - 1 : Math.max(0, index - 1); }
+      else if (event.key === 'ArrowRight') { index = index < 0 ? 0 : Math.min(history.count - 1, index + 1); }
+      else if (event.key === 'Home') { index = 0; }
+      else if (event.key === 'End') { index = history.count - 1; }
+      else if (event.key === 'Escape') { uiState.hoverIndex = -1; renderHistoryTooltip(); return; }
+      else { return; }
+      event.preventDefault();
+      uiState.hoverIndex = index;
+      renderHistoryTooltip();
+    }
+
+    /* =====================================================================
+       Layer 12 — tabs: presentation state only.
+       ===================================================================== */
+    function moveTabIndicator() {
+      const indicator = document.getElementById('tabs-indicator');
+      const container = document.getElementById('tabs');
+      if (!indicator || !container) { return; }
+      const active = dom.tabs.filter(function (tab) { return tab.dataset.mode === uiState.activeMode; })[0];
+      if (!active) { return; }
+      const base = container.getBoundingClientRect();
+      const rect = active.getBoundingClientRect();
+      indicator.style.opacity = '1';
+      indicator.style.width = rect.width + 'px';
+      indicator.style.height = rect.height + 'px';
+      indicator.style.transform = 'translate(' + (rect.left - base.left) + 'px,' + (rect.top - base.top) + 'px)';
+    }
+
+    function setActiveMode(mode) {
+      const next = MODES.indexOf(mode) >= 0 ? mode : DEFAULT_MODE;
+      uiState.activeMode = next;
+
+      dom.tabs.forEach(function (tab) {
+        const selected = tab.dataset.mode === next;
+        tab.setAttribute('aria-selected', selected ? 'true' : 'false');
+        tab.tabIndex = selected ? 0 : -1;
+      });
+      MODES.forEach(function (candidate) {
+        const panel = dom.panelsByMode[candidate];
+        if (panel) { panel.hidden = (candidate !== next); }
+      });
+
+      renderCurrentMode();   // same uiModel, no fetch, no extra polling
+      moveTabIndicator();
+      return next;
+    }
+
+    function onTabKeydown(event) {
+      if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].indexOf(event.key) < 0) { return; }
+      event.preventDefault();
+      const current = MODES.indexOf(uiState.activeMode);
+      let next = current;
+      if (event.key === 'ArrowLeft') { next = (current - 1 + MODES.length) % MODES.length; }
+      if (event.key === 'ArrowRight') { next = (current + 1) % MODES.length; }
+      if (event.key === 'Home') { next = 0; }
+      if (event.key === 'End') { next = MODES.length - 1; }
+      setActiveMode(MODES[next]);
+      if (dom.tabs[next]) { dom.tabs[next].focus(); }
+    }
+
+    function initTabs() {
+      dom.tabs = Array.prototype.slice.call(document.querySelectorAll('[role="tab"]'));
+      MODES.forEach(function (mode) {
+        dom.panelsByMode[mode] = document.getElementById('panel-' + mode);
+      });
+      dom.tabs.forEach(function (tab) {
+        tab.addEventListener('click', function () { setActiveMode(tab.dataset.mode); });
+        tab.addEventListener('keydown', onTabKeydown);
+      });
+    }
+
+    /* =====================================================================
+       Layer 13 — polling. Recursive setTimeout + in-flight guard.
+       ===================================================================== */
+    function scheduleNextPoll() {
+      if (uiState.timerId !== null) { clearTimeout(uiState.timerId); }
+      const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+      const delay = hidden ? APP_CONFIG.pollIntervalHiddenMs : APP_CONFIG.pollIntervalMs;
+      uiState.timerId = setTimeout(pollOnce, delay);
+    }
+
+    async function pollOnce() {
+      if (uiState.inFlight) {
+        scheduleNextPoll();
+        return;
+      }
+      uiState.inFlight = true;
+      uiState.pollCount += 1;
+
+      try {
+        const raw = await fetchWeather();
+        const normalized = normalizeWeather(raw);
+
+        uiState.weather = normalized;
+        uiState.connection = CONNECTION_STATES.ONLINE;
+        uiState.lastSuccessAt = Date.now();
+        uiState.lastErrorMessage = '';
+
+        updateHistory(normalized, uiState.lastSuccessAt);   // same cycle, no second timer
+        renderCurrentMode();
+      } catch (error) {
+        uiState.connection = CONNECTION_STATES.OFFLINE;
+        uiState.lastErrorAt = Date.now();
+        uiState.lastErrorMessage = (error && error.message) ? error.message : String(error);
+        uiState.errorCount += 1;
+
+        // History stays intact while offline; only live states degrade.
+        renderCurrentMode();
+      } finally {
+        uiState.inFlight = false;
+        renderConnectionState();
+        scheduleNextPoll();
+      }
+    }
+
+    function handleVisibilityChange() {
+      renderConnectionState();
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        scheduleNextPoll();
+      }
+    }
+
+    function startUiTicker() {
+      if (uiState.tickerId !== null) { return; }
+      uiState.tickerId = setInterval(function () {
+        renderCurrentMode();
+      }, APP_CONFIG.uiTickMs);
+    }
+
+    function handleResize() {
+      if (uiState.activeMode === 'history') { renderHistory(uiState.uiModel); }
+      moveTabIndicator();
+    }
+
+    function cacheDom() {
+      dom.connection = document.getElementById('connection');
+      dom.connectionLabel = document.getElementById('connection-label');
+      dom.connectionMeta = document.getElementById('connection-meta');
+      dom.uptime = document.getElementById('uptime');
+      dom.pollInterval = document.getElementById('poll-interval');
+    }
+
+    function init() {
+      cacheDom();
+      buildPanels();
+      initTabs();
+      historyConfigure(HISTORY_CONFIG.defaultPresetId, Date.now());
+      setActiveMode(DEFAULT_MODE);
+      startUiTicker();
+      pollOnce();
+      if (typeof document !== 'undefined' && document.addEventListener) {
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        window.addEventListener('resize', handleResize);
+      }
+    }
+
+    if (typeof document !== 'undefined') {
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+      } else {
+        init();
+      }
+    }
+  </script>
+</body>
+</html>

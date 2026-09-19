@@ -1,0 +1,16 @@
+# =============================================================================
+# Line-ending policy for the files whose BYTES matter.
+#
+# web/index.html is embedded into the firmware byte-for-byte
+# (board_build.embed_files -> objcopy), and its SHA-256 is part of the verified
+# API/Web contract. core.autocrlf would otherwise check it out as CRLF on Windows
+# and change the embedded page. Pinning it to LF keeps every clone identical.
+#
+# Everything else keeps the Git-for-Windows default (CRLF in the working tree,
+# LF in the repository), which does not affect the compiled output.
+# =============================================================================
+web/index.html text eol=lf
+
+# Binary assets are never line-ending converted.
+*.png binary
+*.ppm binary

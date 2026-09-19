@@ -1,0 +1,31 @@
+# =============================================================================
+# Build output and machine-local files. Source, docs and the DSH skills are
+# tracked on purpose; everything below is regenerated or user-specific.
+# =============================================================================
+
+# --- PlatformIO / embedded build output --------------------------------------
+.pio/
+.piobkp/
+.pioenvs/
+.piolibdeps/
+build/
+cmake-build-*/
+*.tmp
+*.log
+*.elf
+*.bin
+*.map
+.cache/
+
+# --- screenshots / test artifacts (PPM is a simulator screenshot format) -----
+*.ppm
+
+# --- editor / OS --------------------------------------------------------------
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# --- secrets: real values live here only; the example file IS tracked --------
+include/secrets.h
